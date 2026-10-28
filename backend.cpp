@@ -1,11 +1,12 @@
-// backend.cpp - Windows, Linux and macOS implementations of backend.h.
-// Shared code comes first, then one #ifdef block per OS.
 #include "backend.h"
 
 #include <algorithm>
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <iterator>
+#include <random>
 #include <utility>
 
 #ifdef _WIN32
@@ -15,11 +16,18 @@
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
+    #include <winsock2.h>
+    #include <ws2tcpip.h>
     #include <windows.h>
     #include <mmsystem.h>
     #include <io.h>
 #else
+    #include <arpa/inet.h>
+    #include <netinet/in.h>
+    #include <netinet/tcp.h>
+    #include <sys/socket.h>
     #ifdef __APPLE__
+        #include <mach-o/dyld.h>
         #include <pulse/pulseaudio.h>
     #else
         #include <alsa/asoundlib.h>
@@ -30,6 +38,7 @@
     #include <glob.h>
     #include <poll.h>
     #include <signal.h>
+    #include <sys/ioctl.h>
     #include <sys/wait.h>
     #include <termios.h>
     #include <unistd.h>
@@ -39,10 +48,23 @@ namespace os {
 
 // ---- Shared ------------------------------------------------------------------
 
+bool portAvailable(int port);   // Per OS, below
+
+int freeTcpPort() {
+    // direwolf only takes ports up to 49151
+    constexpr int low = 20000, high = 49151;
+    static std::mt19937 random{std::random_device{}()};
+    std::uniform_int_distribution<int> pick(low, high);
+    for (int attempt = 0; attempt < 100; attempt++) {
+        int port = pick(random);
+        if (portAvailable(port)) return port;
+    }
+    return 0;
+}
+
 Process::~Process() {
     closeStdin();
     closePipe();
-    // Don't leave a child running (or a zombie) behind once nothing can talk to it
     if (running()) kill();
     wait();
 }
@@ -86,7 +108,6 @@ std::string narrow(const wchar_t* s) {
     return result;
 }
 
-// "CreatePipe: The system cannot find the file specified." style messages
 std::string lastErrorMessage(const char* what) {
     DWORD code = GetLastError();
     wchar_t* text = nullptr;
@@ -100,8 +121,7 @@ std::string lastErrorMessage(const char* what) {
     return message;
 }
 
-// Windows passes one command line string, which the child splits back into argv.
-// Quotes each argument so it splits back exactly (the CommandLineToArgvW rules)
+// Quotes an argument by the CommandLineToArgvW rules
 void appendQuoted(std::wstring& cmd, const std::wstring& arg) {
     if (!arg.empty() && arg.find_first_of(L" \t\n\v\"") == std::wstring::npos) {
         cmd += arg;
@@ -145,11 +165,13 @@ void Process::closePipe() {
     }
 }
 
-bool Process::start(const std::vector<std::string>& argv, bool captureStdout, bool pipeStdin) {
+bool Process::start(const std::vector<std::string>& argv, bool captureStdout, bool pipeStdin,
+                    const std::string& workingDir) {
     if (argv.empty()) {
         lastError = "start: no program given";
         return false;
     }
+    std::wstring dir = widen(workingDir);
     std::wstring cmdLine;
     for (const std::string& arg : argv) {
         if (!cmdLine.empty()) cmdLine += L' ';
@@ -158,7 +180,7 @@ bool Process::start(const std::vector<std::string>& argv, bool captureStdout, bo
 
     STARTUPINFOW si{};
     si.cb = sizeof si;
-    SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};   // Inheritable, so the child gets them
+    SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};   // Inheritable
     HANDLE outRead = nullptr, outWrite = nullptr;
     HANDLE inRead  = nullptr, inWrite  = nullptr;
     if (captureStdout) {
@@ -186,12 +208,11 @@ bool Process::start(const std::vector<std::string>& argv, bool captureStdout, bo
     }
 
     PROCESS_INFORMATION pi{};
-    // No application name: Windows takes the program from the command line and searches PATH
+    // No application name, so Windows searches PATH
     BOOL ok = CreateProcessW(nullptr, cmdLine.data(), nullptr, nullptr, TRUE, 0,
-                             nullptr, nullptr, &si, &pi);
+                             nullptr, dir.empty() ? nullptr : dir.c_str(), &si, &pi);
     if (!ok) lastError = lastErrorMessage(argv[0].c_str());
-    // Our copies of the child's ends have to close, or read() never sees end of output
-    // and the child never sees end of input
+    // Close our copies of the child's ends so EOF works both ways
     if (outWrite) CloseHandle(outWrite);
     if (inRead)   CloseHandle(inRead);
     if (!ok) {
@@ -258,6 +279,107 @@ void Process::kill() {
     if (processHandle) TerminateProcess(static_cast<HANDLE>(processHandle), 1);
 }
 
+void Process::interrupt() {
+    // No usable Ctrl-C for a child on Windows
+    kill();
+}
+
+// ---- Network (Winsock) ---------------------------------------------------------
+
+namespace {
+
+bool winsockReady() {
+    static const bool ready = [] {
+        WSADATA data;
+        return WSAStartup(MAKEWORD(2, 2), &data) == 0;
+    }();
+    return ready;
+}
+
+std::string socketError(const char* what) {
+    return std::string(what) + ": Winsock error " + std::to_string(WSAGetLastError());
+}
+
+} // namespace
+
+TcpConnection::~TcpConnection() { close(); }
+
+bool TcpConnection::connect(const std::string& host, int port) {
+    close();
+    if (!winsockReady()) {
+        lastError = "Winsock could not start";
+        return false;
+    }
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) {
+        lastError = socketError("socket");
+        return false;
+    }
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<u_short>(port));
+    inet_pton(AF_INET, host.c_str(), &addr.sin_addr);
+    if (::connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof addr) == SOCKET_ERROR) {
+        lastError = socketError(("connect to " + host + ":" + std::to_string(port)).c_str());
+        closesocket(s);
+        return false;
+    }
+    BOOL noDelay = TRUE;
+    setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof noDelay);
+    sock = static_cast<long long>(s);
+    return true;
+}
+
+long TcpConnection::read(char* buf, size_t size) {
+    if (sock == -1) return 0;
+    int n = recv(static_cast<SOCKET>(sock), buf, static_cast<int>(size), 0);
+    if (n == SOCKET_ERROR) {
+        lastError = socketError("recv");
+        return -1;
+    }
+    return n;
+}
+
+bool TcpConnection::write(std::string_view data) {
+    if (sock == -1) return false;
+    while (!data.empty()) {
+        int n = send(static_cast<SOCKET>(sock), data.data(), static_cast<int>(data.size()), 0);
+        if (n == SOCKET_ERROR) {
+            lastError = socketError("send");
+            return false;
+        }
+        data.remove_prefix(static_cast<size_t>(n));
+    }
+    return true;
+}
+
+void TcpConnection::shutdown() {
+    if (sock != -1) ::shutdown(static_cast<SOCKET>(sock), SD_BOTH);
+}
+
+void TcpConnection::close() {
+    if (sock != -1) {
+        closesocket(static_cast<SOCKET>(sock));
+        sock = -1;
+    }
+}
+
+bool portAvailable(int port) {
+    if (!winsockReady()) return false;
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) return false;
+    // Without this Windows lets bind succeed on a port already in use
+    BOOL exclusive = TRUE;
+    setsockopt(s, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&exclusive), sizeof exclusive);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);   // How direwolf listens
+    addr.sin_port = htons(static_cast<u_short>(port));
+    bool ok = bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof addr) == 0;
+    closesocket(s);
+    return ok;
+}
+
 std::vector<AudioDevice> listAudioDevices(AudioDirection direction) {
     std::vector<AudioDevice> devices;
     if (direction == AudioDirection::Capture) {
@@ -302,7 +424,7 @@ void setRawMode(bool enable) {
     if (enable && !active) {
         GetConsoleMode(in, &oldMode);
         DWORD newMode = oldMode & ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
-        // Arrow keys then arrive as "ESC [ A", the same as a Linux terminal sends
+        // Arrow keys as escape sequences, like Linux
         newMode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
         SetConsoleMode(in, newMode);
         active = true;
@@ -316,7 +438,6 @@ void setInterruptKey(bool enable) {
     HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
     DWORD mode;
     if (!isTerminal(stdin) || !GetConsoleMode(in, &mode)) return;
-    // Processed input is what turns Ctrl-C into a signal instead of a key
     SetConsoleMode(in, enable ? mode | ENABLE_PROCESSED_INPUT : mode & ~ENABLE_PROCESSED_INPUT);
 }
 
@@ -331,8 +452,7 @@ int readInputByte() {
 bool waitForInput(int timeoutMs) {
     HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
     if (!isTerminal(stdin)) return WaitForSingleObject(in, timeoutMs) == WAIT_OBJECT_0;
-    // The console also wakes up for key releases, focus changes and mouse moves, which
-    // ReadFile skips over. Drop those so a wakeup means a byte is really there
+    // Skip console events that aren't key presses (releases, focus, mouse)
     ULONGLONG deadline = GetTickCount64() + timeoutMs;
     for (;;) {
         INPUT_RECORD record;
@@ -351,7 +471,6 @@ bool waitForInput(int timeoutMs) {
 std::vector<std::string> listSerialPorts() {
     std::vector<std::string> ports;
     HKEY key;
-    // Every serial port Windows knows about, including USB ones, is listed here
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"HARDWARE\\DEVICEMAP\\SERIALCOMM", 0, KEY_READ,
                       &key) != ERROR_SUCCESS) return ports;
     for (DWORD i = 0;; i++) {
@@ -387,9 +506,7 @@ bool isFile(const std::wstring& path) {
     return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-// A Cygwin program needs cygwin1.dll, which lives in <cygwin>\bin. Windows only finds it
-// through PATH, so when minimodem sits under a Cygwin install put that bin folder on our
-// PATH; the child inherits it
+// Puts Cygwin's bin (for cygwin1.dll) on PATH when minimodem is under a Cygwin install
 void addCygwinDllToPath(const std::wstring& exePath) {
     for (const wchar_t* suffix : {L"\\usr\\local\\bin\\minimodem.exe", L"\\bin\\minimodem.exe"}) {
         std::wstring tail = suffix;
@@ -406,8 +523,7 @@ void addCygwinDllToPath(const std::wstring& exePath) {
     }
 }
 
-// PATH first, then the usual Cygwin install folders. A program started before minimodem's
-// folder was added to PATH (e.g. CLion left open since then) still has the old PATH
+// PATH, then the usual Cygwin folders
 std::string findMinimodem() {
     wchar_t found[MAX_PATH];
     std::wstring exe;
@@ -421,7 +537,7 @@ std::string findMinimodem() {
             if (isFile(candidate)) { exe = candidate; break; }
         }
     }
-    if (exe.empty()) return "minimodem.exe";   // start() then reports it can't be found
+    if (exe.empty()) return "minimodem.exe";
     addCygwinDllToPath(exe);
     return narrow(exe.c_str());
 }
@@ -434,15 +550,178 @@ const char* minimodemPath() {
 }
 
 namespace {
-BOOL WINAPI swallowInterrupt(DWORD type) {
-    return type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT;
+
+// Our own PulseAudio for minimodem, open on the chosen sound cards
+struct MinimodemPulse {
+    std::string playback, capture;   // WinMM device numbers, "" = not opened
+    HANDLE process = nullptr;
+    HANDLE job     = nullptr;        // Kills PulseAudio when we exit, even on a crash
+};
+MinimodemPulse pulse;
+
+// Cygwin's bin folder (where minimodem's DLLs are), then PATH
+std::wstring findPulseaudio() {
+    std::wstring exe = widen(minimodemPath());
+    size_t slash = exe.find_last_of(L"\\/");
+    if (slash != std::wstring::npos) {
+        std::wstring dir = exe.substr(0, slash);
+        const std::wstring local = L"\\usr\\local\\bin";
+        if (dir.size() > local.size() &&
+            _wcsicmp(dir.c_str() + dir.size() - local.size(), local.c_str()) == 0)
+            dir = dir.substr(0, dir.size() - local.size()) + L"\\bin";
+        if (isFile(dir + L"\\pulseaudio.exe")) return dir + L"\\pulseaudio.exe";
+    }
+    wchar_t found[MAX_PATH];
+    if (SearchPathW(nullptr, L"pulseaudio.exe", nullptr, MAX_PATH, found, nullptr) > 0) return found;
+    return L"";
 }
+
+void stopPulse() {
+    if (!pulse.process) return;
+    TerminateProcess(pulse.process, 0);
+    WaitForSingleObject(pulse.process, 2000);
+    CloseHandle(pulse.process);
+    pulse.process = nullptr;
+    pulse.playback.clear();
+    pulse.capture.clear();
+    SetEnvironmentVariableW(L"PULSE_SERVER", nullptr);
+    SetEnvironmentVariableW(L"PULSE_SINK", nullptr);
+    SetEnvironmentVariableW(L"PULSE_SOURCE", nullptr);
+}
+
+// "" once it's listening, else what went wrong
+std::string startPulse(const std::string& playback, const std::string& capture) {
+    std::wstring exe = findPulseaudio();
+    if (exe.empty()) return "pulseaudio.exe wasn't found next to minimodem. Install Cygwin's pulseaudio package.";
+    int port = freeTcpPort();
+    if (port == 0) return "No free TCP port for PulseAudio.";
+
+    // -n: none of the default config, which opens the Windows default device
+    std::vector<std::wstring> args = {
+        exe, L"-n", L"--daemonize=no", L"--exit-idle-time=-1", L"--use-pid-file=no",
+        L"-L", L"module-native-protocol-tcp listen=127.0.0.1 auth-anonymous=1 port=" + std::to_wstring(port)};
+    if (!playback.empty()) {
+        args.push_back(L"-L");
+        args.push_back(L"module-waveout sink_name=hamproof_tx record=0 output_device=" + widen(playback));
+    }
+    if (!capture.empty()) {
+        args.push_back(L"-L");
+        args.push_back(L"module-waveout source_name=hamproof_rx playback=0 input_device=" + widen(capture));
+    }
+    std::wstring cmdLine;
+    for (const std::wstring& arg : args) {
+        if (!cmdLine.empty()) cmdLine += L' ';
+        appendQuoted(cmdLine, arg);
+    }
+
+    // Its log would land on our screen
+    SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
+    HANDLE nul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             &sa, OPEN_EXISTING, 0, nullptr);
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = si.hStdOutput = si.hStdError = nul;
+    PROCESS_INFORMATION pi{};
+    BOOL ok = CreateProcessW(exe.c_str(), cmdLine.data(), nullptr, nullptr, TRUE,
+                             CREATE_SUSPENDED | CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    std::string error = ok ? "" : lastErrorMessage("pulseaudio");
+    if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+    if (!ok) return error;
+
+    if (!pulse.job) {
+        pulse.job = CreateJobObjectW(nullptr, nullptr);
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (pulse.job) SetInformationJobObject(pulse.job, JobObjectExtendedLimitInformation, &limits, sizeof limits);
+    }
+    if (pulse.job) AssignProcessToJobObject(pulse.job, pi.hProcess);
+    ResumeThread(pi.hThread);
+    CloseHandle(pi.hThread);
+    pulse.process = pi.hProcess;
+
+    // Takes a second or two. It quits if it can't open a sound card
+    for (int waited = 0; waited < 8000; waited += 100) {
+        if (WaitForSingleObject(pulse.process, 100) == WAIT_OBJECT_0) {
+            stopPulse();
+            return "PulseAudio couldn't open that sound card.";
+        }
+        TcpConnection probe;
+        if (probe.connect("127.0.0.1", port)) {
+            probe.close();
+            pulse.playback = playback;
+            pulse.capture = capture;
+            SetEnvironmentVariableW(L"PULSE_SERVER", (L"tcp:127.0.0.1:" + std::to_wstring(port)).c_str());
+            SetEnvironmentVariableW(L"PULSE_SINK", playback.empty() ? nullptr : L"hamproof_tx");
+            SetEnvironmentVariableW(L"PULSE_SOURCE", capture.empty() ? nullptr : L"hamproof_rx");
+            return "";
+        }
+    }
+    stopPulse();
+    return "PulseAudio didn't start.";
+}
+
 } // namespace
 
-// Children share our console, so they still get Ctrl-C. Unlike a null handler (which
-// children inherit), a handler function only applies to us
-void catchInterrupt(bool enable) {
-    SetConsoleCtrlHandler(swallowInterrupt, enable ? TRUE : FALSE);
+std::string useMinimodemDevice(const std::string& device, AudioDirection direction) {
+    if (device.empty() || device.find_first_not_of("0123456789") != std::string::npos)
+        return "\"" + device + "\" isn't a Windows sound card number.";
+    std::string playback = pulse.playback, capture = pulse.capture;
+    (direction == AudioDirection::Playback ? playback : capture) = device;
+    bool running = pulse.process && WaitForSingleObject(pulse.process, 0) == WAIT_TIMEOUT;
+    if (running && playback == pulse.playback && capture == pulse.capture) return "";
+    stopPulse();
+    return startPulse(playback, capture);
+}
+
+namespace {
+
+// Our folder first (the build puts a Hamlib-enabled direwolf there), then PATH, then
+// the usual install folders
+std::string findDirewolfTool(const std::string& name) {
+    std::wstring file = widen(name + ".exe");
+    std::string exeDir = executableDir();
+    if (!exeDir.empty() && isFile(widen(exeDir) + L"\\" + file)) return exeDir + "\\" + name + ".exe";
+    wchar_t found[MAX_PATH];
+    if (SearchPathW(nullptr, file.c_str(), nullptr, MAX_PATH, found, nullptr) > 0) return narrow(found);
+    for (const wchar_t* dir : {L"C:\\direwolf", L"C:\\Program Files\\direwolf",
+                               L"C:\\Program Files (x86)\\direwolf"}) {
+        std::wstring candidate = std::wstring(dir) + L"\\" + file;
+        if (isFile(candidate)) return narrow(candidate.c_str());
+    }
+    return name + ".exe";
+}
+
+} // namespace
+
+const char* direwolfPath() {
+    static const std::string path = findDirewolfTool("direwolf");
+    return path.c_str();
+}
+
+const char* atestPath() {
+    static const std::string path = findDirewolfTool("atest");
+    return path.c_str();
+}
+
+const char* genPacketsPath() {
+    static const std::string path = findDirewolfTool("gen_packets");
+    return path.c_str();
+}
+
+TerminalSize terminalSize() {
+    CONSOLE_SCREEN_BUFFER_INFO info;
+    if (!GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &info)) return {24, 80};
+    return {info.srWindow.Bottom - info.srWindow.Top + 1, info.srWindow.Right - info.srWindow.Left + 1};
+}
+
+std::string executableDir() {
+    wchar_t path[MAX_PATH];
+    DWORD len = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (len == 0 || len == MAX_PATH) return "";
+    std::string full = narrow(path);
+    size_t slash = full.find_last_of("\\/");
+    return slash == std::string::npos ? "" : full.substr(0, slash);
 }
 
 #else
@@ -456,8 +735,7 @@ std::string errnoMessage(const std::string& what, int err) {
 
 #ifndef __APPLE__
 
-// ALSA descriptions span several lines, e.g. "HDA Intel PCH, ALC892 Analog\nFront speakers".
-// Joins the non-empty lines into one: "HDA Intel PCH, ALC892 Analog - Front speakers"
+// Joins a multi-line ALSA description with " - "
 std::string formatDescription(const char* desc) {
     std::string result;
     std::string line;
@@ -478,10 +756,9 @@ std::string formatDescription(const char* desc) {
     return result;
 }
 
-// Many hinted devices (lavrate, speex, upmix, ...) wrap a hardware card that doesn't
-// exist under WSL, so only keep the ones that really open in the direction we need
+// Many hinted devices don't really open (e.g. under WSL), so try each one
 bool canOpen(const char* name, snd_pcm_stream_t stream) {
-    // Failed opens print errors (ALSA, and JACK directly), so mute stderr while probing
+    // Mute stderr: failed opens print errors
     fflush(stderr);
     int savedStderr = dup(STDERR_FILENO);
     int devNull = open("/dev/null", O_WRONLY);
@@ -519,7 +796,8 @@ void Process::closePipe() {
     }
 }
 
-bool Process::start(const std::vector<std::string>& argv, bool captureStdout, bool pipeStdin) {
+bool Process::start(const std::vector<std::string>& argv, bool captureStdout, bool pipeStdin,
+                    const std::string& workingDir) {
     if (argv.empty()) {
         lastError = "start: no program given";
         return false;
@@ -545,14 +823,10 @@ bool Process::start(const std::vector<std::string>& argv, bool captureStdout, bo
             closePipes();
             return false;
         }
-        // Later children mustn't inherit our end, or this child never sees end of input
         fcntl(inPipe[1], F_SETFD, FD_CLOEXEC);
-        // Writing after the child has exited would otherwise kill us with SIGPIPE;
-        // write() then just fails with EPIPE
-        signal(SIGPIPE, SIG_IGN);
+        signal(SIGPIPE, SIG_IGN);   // write() fails with EPIPE instead
     }
-    // If execv fails the child writes errno here. On success the pipe closes on exec, so
-    // the parent reads nothing and knows the program started
+    // The child writes errno here if exec fails; it closes on a successful exec
     int errPipe[2];
     if (pipe(errPipe) == -1) {
         lastError = errnoMessage("pipe", errno);
@@ -581,8 +855,8 @@ bool Process::start(const std::vector<std::string>& argv, bool captureStdout, bo
             dup2(inPipe[0], STDIN_FILENO);
             close(inPipe[0]);
         }
-        execv(args[0], args.data());
-        int err = errno;                     // Only gets here if execv failed
+        if (workingDir.empty() || chdir(workingDir.c_str()) == 0) execv(args[0], args.data());
+        int err = errno;
         ssize_t ignored = ::write(errPipe[1], &err, sizeof err);
         (void)ignored;
         _exit(127);
@@ -651,30 +925,117 @@ int Process::wait() {
     } else if (WIFEXITED(status)) {
         exitCode = WEXITSTATUS(status);
     } else {
-        exitCode = 128 + WTERMSIG(status);   // Same convention as the shell
+        exitCode = 128 + WTERMSIG(status);
     }
     pid = -1;
     return exitCode;
 }
 
 bool Process::running() const {
-    // WNOWAIT only peeks, so the exit status is still there for wait() to collect
     if (pid == -1) return false;
     siginfo_t info{};
+    // WNOWAIT leaves the exit status for wait()
     if (waitid(P_PID, static_cast<id_t>(pid), &info, WEXITED | WNOHANG | WNOWAIT) == -1)
         return false;
-    return info.si_pid == 0;   // Nothing has exited yet
+    return info.si_pid == 0;
 }
 
 void Process::kill() {
     if (pid != -1) ::kill(pid, SIGTERM);
 }
 
+void Process::interrupt() {
+    if (pid != -1) ::kill(pid, SIGINT);
+}
+
+// ---- Network -------------------------------------------------------------------
+
+TcpConnection::~TcpConnection() { close(); }
+
+bool TcpConnection::connect(const std::string& host, int port) {
+    close();
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s == -1) {
+        lastError = errnoMessage("socket", errno);
+        return false;
+    }
+    fcntl(s, F_SETFD, FD_CLOEXEC);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+    inet_pton(AF_INET, host.c_str(), &addr.sin_addr);
+    int r;
+    do { r = ::connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof addr); } while (r == -1 && errno == EINTR);
+    if (r == -1) {
+        lastError = errnoMessage("connect to " + host + ":" + std::to_string(port), errno);
+        ::close(s);
+        return false;
+    }
+    int noDelay = 1;
+    setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &noDelay, sizeof noDelay);
+#ifdef SO_NOSIGPIPE
+    int noSigpipe = 1;
+    setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &noSigpipe, sizeof noSigpipe);
+#endif
+    sock = s;
+    return true;
+}
+
+long TcpConnection::read(char* buf, size_t size) {
+    if (sock == -1) return 0;
+    ssize_t n;
+    do { n = recv(static_cast<int>(sock), buf, size, 0); } while (n == -1 && errno == EINTR);
+    if (n == -1) lastError = errnoMessage("recv", errno);
+    return static_cast<long>(n);
+}
+
+bool TcpConnection::write(std::string_view data) {
+    if (sock == -1) return false;
+#ifdef MSG_NOSIGNAL
+    const int flags = MSG_NOSIGNAL;
+#else
+    const int flags = 0;
+#endif
+    while (!data.empty()) {
+        ssize_t n = send(static_cast<int>(sock), data.data(), data.size(), flags);
+        if (n == -1) {
+            if (errno == EINTR) continue;
+            lastError = errnoMessage("send", errno);
+            return false;
+        }
+        data.remove_prefix(static_cast<size_t>(n));
+    }
+    return true;
+}
+
+void TcpConnection::shutdown() {
+    if (sock != -1) ::shutdown(static_cast<int>(sock), SHUT_RDWR);
+}
+
+void TcpConnection::close() {
+    if (sock != -1) {
+        ::close(static_cast<int>(sock));
+        sock = -1;
+    }
+}
+
+bool portAvailable(int port) {
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s == -1) return false;
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);   // How direwolf listens
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+    bool ok = bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof addr) == 0;
+    ::close(s);
+    return ok;
+}
+
 #ifdef __APPLE__
 namespace {
 
 void addSource(pa_context*, const pa_source_info* info, int eol, void* userdata) {
-    // Monitors replay what an output is playing; they aren't microphones or line-ins
+    // Skip monitors of outputs
     if (eol || info->monitor_of_sink != PA_INVALID_INDEX) return;
     static_cast<std::vector<AudioDevice>*>(userdata)->push_back(
         {info->name, info->description ? info->description : info->name});
@@ -688,12 +1049,11 @@ void addSink(pa_context*, const pa_sink_info* info, int eol, void* userdata) {
 
 } // namespace
 
-// Homebrew's minimodem only has PulseAudio, so list what the PulseAudio server offers
-// (it picks up the Mac's CoreAudio devices). The names are what PULSE_SOURCE/PULSE_SINK take
+// PulseAudio devices; names are what PULSE_SOURCE/PULSE_SINK take
 std::vector<AudioDevice> listAudioDevices(AudioDirection direction) {
     std::vector<AudioDevice> devices;
     pa_mainloop* loop = pa_mainloop_new();
-    pa_context* context = pa_context_new(pa_mainloop_get_api(loop), "RTTY-Connector");
+    pa_context* context = pa_context_new(pa_mainloop_get_api(loop), "Radio to Text Connector");
 
     bool ready = context && pa_context_connect(context, nullptr, PA_CONTEXT_NOFLAGS, nullptr) >= 0;
     while (ready && pa_context_get_state(context) != PA_CONTEXT_READY) {
@@ -734,10 +1094,8 @@ std::vector<AudioDevice> listAudioDevices(AudioDirection direction) {
     }
 
     for (void** n = hints; *n != nullptr; ++n) {
-        // The name used to open the device (e.g. hw:0,0) and the user-friendly description
         char* name = snd_device_name_get_hint(*n, "NAME");
         char* desc = snd_device_name_get_hint(*n, "DESC");
-        // "Input", "Output", or null when the device does both
         char* ioid = snd_device_name_get_hint(*n, "IOID");
 
         const char* wrongWay = stream == SND_PCM_STREAM_CAPTURE ? "Output" : "Input";
@@ -805,13 +1163,11 @@ bool waitForInput(int timeoutMs) {
 std::vector<std::string> listSerialPorts() {
     std::vector<std::string> ports;
 #ifdef __APPLE__
-    // USB serial adapters (FTDI, CP210x, CH340) and radios with built-in USB. The cu.*
-    // ("call-up") devices open straight away; tty.* ones wait for a carrier-detect signal
+    // cu.* rather than tty.*, which wait for carrier detect
     const char* patterns[] = {"/dev/cu.usbserial*", "/dev/cu.usbmodem*",
                               "/dev/cu.SLAB_USBtoUART*", "/dev/cu.wchusbserial*"};
 #else
-    // USB serial adapters and radios with built-in USB. ttyS* are left out: Linux creates
-    // them whether or not anything is there
+    // USB only; ttyS* always exist
     const char* patterns[] = {"/dev/ttyUSB*", "/dev/ttyACM*"};
 #endif
     for (const char* pattern : patterns) {
@@ -824,13 +1180,12 @@ std::vector<std::string> listSerialPorts() {
     return ports;
 }
 
-void enableAnsiEscapes() {}   // Linux and macOS terminals handle them already
+void enableAnsiEscapes() {}
 
 namespace {
 
-// PATH first, then where `make install` (/usr/local) and Homebrew on Apple Silicon
-// (/opt/homebrew) put it
-std::string findMinimodem() {
+// PATH, /usr/local/bin, /opt/homebrew/bin, then our folder. "" if not found
+std::string findProgram(const std::string& name) {
     std::vector<std::string> dirs;
     if (const char* path = getenv("PATH")) {
         std::string list = path;
@@ -841,31 +1196,62 @@ std::string findMinimodem() {
         }
         dirs.push_back(list.substr(start));
     }
-    dirs.insert(dirs.end(), {"/usr/local/bin", "/opt/homebrew/bin"});
+    dirs.insert(dirs.end(), {"/usr/local/bin", "/opt/homebrew/bin", executableDir()});
     for (const std::string& dir : dirs) {
         if (dir.empty()) continue;
-        std::string candidate = dir + "/minimodem";
+        std::string candidate = dir + "/" + name;
         if (access(candidate.c_str(), X_OK) == 0) return candidate;
     }
-    return "/usr/local/bin/minimodem";   // start() then reports it can't be found
+    return "";
 }
 
-void swallowInterrupt(int) {}
+std::string programPath(const std::string& name) {
+    std::string found = findProgram(name);
+    return found.empty() ? "/usr/local/bin/" + name : found;
+}
 
 } // namespace
 
 const char* minimodemPath() {
-    static const std::string path = findMinimodem();
+    static const std::string path = programPath("minimodem");
     return path.c_str();
 }
 
-// A handler function rather than SIG_IGN: exec resets handlers to the default, so the
-// programs we start still stop on Ctrl-C, but an ignored signal would stay ignored in them
-void catchInterrupt(bool enable) {
-    struct sigaction action{};
-    action.sa_handler = enable ? swallowInterrupt : SIG_DFL;
-    sigemptyset(&action.sa_mask);
-    sigaction(SIGINT, &action, nullptr);
+const char* direwolfPath() {
+    static const std::string path = programPath("direwolf");
+    return path.c_str();
+}
+
+const char* atestPath() {
+    static const std::string path = programPath("atest");
+    return path.c_str();
+}
+
+const char* genPacketsPath() {
+    static const std::string path = programPath("gen_packets");
+    return path.c_str();
+}
+
+TerminalSize terminalSize() {
+    winsize size{};
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) == -1 || size.ws_row == 0) return {24, 80};
+    return {size.ws_row, size.ws_col};
+}
+
+std::string executableDir() {
+    char path[4096];
+#ifdef __APPLE__
+    uint32_t size = sizeof path;
+    if (_NSGetExecutablePath(path, &size) != 0) return "";
+    char resolved[4096];
+    std::string full = realpath(path, resolved) ? resolved : path;
+#else
+    ssize_t len = readlink("/proc/self/exe", path, sizeof path - 1);
+    if (len <= 0) return "";
+    std::string full(path, static_cast<size_t>(len));
+#endif
+    size_t slash = full.rfind('/');
+    return slash == std::string::npos ? "" : full.substr(0, slash);
 }
 
 #endif

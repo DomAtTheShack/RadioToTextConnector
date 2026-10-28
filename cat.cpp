@@ -1,7 +1,3 @@
-//
-// Created by dooli on 2026/10/07.
-//
-
 #include "cat.h"
 
 #include <stdexcept>
@@ -10,7 +6,7 @@ namespace {
 
 void check(int status, const char* what) {
     if (status != RIG_OK) {
-        // rigerror() would append Hamlib's whole debug trace; rigerror2() is just the message
+        // rigerror2: message without the debug trace
         throw std::runtime_error(std::string(what) + ": " + rigerror2(status));
     }
 }
@@ -21,9 +17,63 @@ void setConf(RIG* rig, const char* name, const std::string& value) {
 
 }
 
+const std::vector<RadioModel>& commonRadios() {
+    static const std::vector<RadioModel> radios = {
+        {RIG_MODEL_IC7300,   "Icom IC-7300"},
+#ifdef RIG_MODEL_IC7300MK2
+        {RIG_MODEL_IC7300MK2, "Icom IC-7300MK2"},
+#endif
+        {RIG_MODEL_IC705,    "Icom IC-705"},
+        {RIG_MODEL_IC7610,   "Icom IC-7610"},
+        {RIG_MODEL_IC9700,   "Icom IC-9700"},
+        {RIG_MODEL_IC7100,   "Icom IC-7100"},
+        {RIG_MODEL_IC7000,   "Icom IC-7000"},
+        {RIG_MODEL_IC9100,   "Icom IC-9100"},
+        {RIG_MODEL_FTDX3000, "Yaesu FTDX-3000"},
+        {RIG_MODEL_FTDX10,   "Yaesu FTDX-10"},
+        {RIG_MODEL_FTDX101D, "Yaesu FTDX-101D"},
+        {RIG_MODEL_FTDX5000, "Yaesu FTDX-5000"},
+        {RIG_MODEL_FT991,    "Yaesu FT-991 / FT-991A"},
+        {RIG_MODEL_FT710,    "Yaesu FT-710"},
+        {RIG_MODEL_FT891,    "Yaesu FT-891"},
+        {RIG_MODEL_FT817,    "Yaesu FT-817"},
+        {RIG_MODEL_FT818,    "Yaesu FT-818"},
+        {RIG_MODEL_FT857,    "Yaesu FT-857"},
+        {RIG_MODEL_FT897,    "Yaesu FT-897"},
+        {RIG_MODEL_TS590SG,  "Kenwood TS-590SG"},
+        {RIG_MODEL_TS590S,   "Kenwood TS-590S"},
+        {RIG_MODEL_TS890S,   "Kenwood TS-890S"},
+        {RIG_MODEL_TS2000,   "Kenwood TS-2000"},
+        {RIG_MODEL_TS480,    "Kenwood TS-480"},
+        {RIG_MODEL_K3,       "Elecraft K3 / K3S"},
+        {RIG_MODEL_KX3,      "Elecraft KX3 / KX2"},
+        {RIG_MODEL_K4,       "Elecraft K4"},
+        {RIG_MODEL_X6100,    "Xiegu X6100"},
+#ifdef RIG_MODEL_X6200
+        {RIG_MODEL_X6200,    "Xiegu X6200"},
+#endif
+        {RIG_MODEL_G90,      "Xiegu G90"},
+        {RIG_MODEL_NETRIGCTL, "rigctld (host:port)"},
+        {RIG_MODEL_DUMMY,    "Hamlib dummy rig"},
+    };
+    return radios;
+}
+
+std::string radioName(rig_model_t model) {
+    for (const RadioModel& radio : commonRadios())
+        if (radio.model == model) return radio.name;
+    static const bool loaded = [] {
+        rig_set_debug(RIG_DEBUG_NONE);
+        return rig_load_all_backends() == RIG_OK;
+    }();
+    (void)loaded;
+    const rig_caps* caps = rig_get_caps(model);
+    if (!caps) return "";
+    return std::string(caps->mfg_name) + " " + caps->model_name;
+}
+
 Cat::Cat(rig_model_t model, const std::string& port, int baud) {
-    // Hamlib logs to stderr by default, which would scribble over the menus
-    rig_set_debug(RIG_DEBUG_NONE);
+    rig_set_debug(RIG_DEBUG_NONE);   // Keep Hamlib off the screen
 
     rig_ = rig_init(model);
     if (!rig_) {
@@ -31,7 +81,7 @@ Cat::Cat(rig_model_t model, const std::string& port, int baud) {
     }
 
     try {
-        // The dummy rig needs no port; given one, it tries to reach it over the network
+        // The dummy rig takes no port
         if (model != RIG_MODEL_DUMMY) {
             setConf(rig_, "rig_pathname", port);
         }

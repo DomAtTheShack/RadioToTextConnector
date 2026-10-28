@@ -1,7 +1,4 @@
-// backend.h - OS abstraction layer. Everything that differs between Windows, Linux and
-// macOS (running programs, pipes, audio devices, file checks, terminal modes) goes through
-// here, so the rest of HamProof calls the same functions on every OS.
-// The implementations live in backend.cpp.
+// backend.h - Everything that differs between Windows, Linux and macOS.
 #ifndef HAMPROOF_BACKEND_H
 #define HAMPROOF_BACKEND_H
 
@@ -15,7 +12,6 @@ namespace os {
 
 // ---- Processes ---------------------------------------------------------------
 
-// A child program, optionally with its stdout piped back to us and its stdin fed by us
 class Process {
 public:
     Process() = default;
@@ -25,18 +21,17 @@ public:
     Process(const Process&) = delete;
     Process& operator=(const Process&) = delete;
 
-    // argv[0] is the program to run. With captureStdout the child's stdout goes to a pipe
-    // that read() drains; otherwise it shares our stdout. With pipeStdin the child reads
-    // what write() sends, until closeStdin(); otherwise it shares our stdin
+    // captureStdout: read() gets its stdout. pipeStdin: write() feeds its stdin
     bool start(const std::vector<std::string>& argv, bool captureStdout = true,
-               bool pipeStdin = false);
+               bool pipeStdin = false, const std::string& workingDir = "");
     long read(char* buf, size_t size);   // >0 bytes read, 0 = end of output, -1 = error
     bool write(std::string_view data);   // false if the child has gone or stdin isn't piped
-    void closeStdin();                   // The child sees end of input
-    int  wait();                         // Blocks until it exits; returns its exit code or -1
+    void closeStdin();
+    int  wait();                         // Exit code, or -1
     bool running() const;
     void kill();
-    const std::string& error() const { return lastError; }  // Why the last call failed
+    void interrupt();                    // SIGINT; kill() on Windows
+    const std::string& error() const { return lastError; }
 
 private:
     void closePipe();
@@ -54,30 +49,55 @@ private:
     std::string lastError;
 };
 
-// Runs a program and hands each chunk of its stdout to onOutput as it arrives.
-// Returns the exit code, or -1 if it couldn't be started (the reason goes to stderr)
+// Exit code, or -1 if it couldn't start
 int runAndPipe(const std::vector<std::string>& argv,
                const std::function<void(std::string_view)>& onOutput);
+
+// ---- Network -----------------------------------------------------------------
+
+// One thread may read while another writes or shuts it down
+class TcpConnection {
+public:
+    TcpConnection() = default;
+    ~TcpConnection();
+    TcpConnection(const TcpConnection&) = delete;
+    TcpConnection& operator=(const TcpConnection&) = delete;
+
+    bool connect(const std::string& host, int port);   // host is an IP address
+    long read(char* buf, size_t size);   // Blocks. >0 bytes read, 0 = closed, -1 = error
+    bool write(std::string_view data);
+    void shutdown();                     // A blocked read() then returns 0
+    void close();
+    const std::string& error() const { return lastError; }
+
+private:
+    long long sock = -1;                 // SOCKET on Windows
+    std::string lastError;
+};
+
+// An unused port below 49152 (direwolf's limit), or 0
+int freeTcpPort();
 
 // ---- Audio devices -----------------------------------------------------------
 
 enum class AudioDirection { Capture, Playback };
 
-// A sound device: the name used to open it plus the text shown in the menu
 struct AudioDevice {
-    // Linux: ALSA name, e.g. "plughw:CARD=PCH,DEV=0". macOS: PulseAudio sink/source name.
-    // Windows: WinMM index
-    std::string name;
-    std::string desc;   // e.g. "HDA Intel PCH, ALC892 Analog - Front speakers"
+    std::string name;   // ALSA name, PulseAudio name (macOS) or WinMM index
+    std::string desc;
 };
 
-// Only devices that really open in the requested direction
 std::vector<AudioDevice> listAudioDevices(AudioDirection direction);
+
+#ifdef _WIN32
+// Cygwin minimodem plays and records through PulseAudio, which normally uses the Windows
+// default device. This runs our own PulseAudio on WinMM device `device` (plus the other
+// direction's, if set before) and points minimodem at it. "" on success, else the problem
+std::string useMinimodemDevice(const std::string& device, AudioDirection direction);
+#endif
 
 // ---- Serial ports ------------------------------------------------------------
 
-// Ports a radio's CAT could be on. Windows: "COM5". Linux: "/dev/ttyUSB0", "/dev/ttyACM0".
-// macOS: "/dev/cu.usbserial-110", "/dev/cu.usbmodem1101"
 std::vector<std::string> listSerialPorts();
 
 // ---- Files -------------------------------------------------------------------
@@ -88,27 +108,23 @@ bool fileReadable(const std::string& path);
 // ---- Terminal ----------------------------------------------------------------
 
 bool isTerminal(FILE* stream);
-// Raw mode: keys arrive one at a time, without waiting for Enter and without echo.
-// Arrow keys arrive as "ESC [ A" style sequences on both OSes
+// Keys one at a time, no echo
 void setRawMode(bool enable);
-// With enable false, Ctrl-C arrives as byte 3 instead of killing us. setRawMode(false)
-// turns it back on
+// false: Ctrl-C arrives as byte 3. setRawMode(false) turns it back on
 void setInterruptKey(bool enable);
-// One byte from the keyboard, unbuffered (stdio's getchar may read ahead), or -1 when
-// stdin has closed
-int readInputByte();
-// True once readInputByte() has something to return, false after timeoutMs without
+int readInputByte();                  // -1 when stdin closes
 bool waitForInput(int timeoutMs);
-// Lets the console understand ANSI escape codes (always true on Linux/macOS terminals)
 void enableAnsiEscapes();
-// With enable true, Ctrl-C stops the programs we started but not us, so we can clean up
-// (e.g. unkey the radio) once they exit
-void catchInterrupt(bool enable);
+struct TerminalSize { int rows; int cols; };
+TerminalSize terminalSize();          // 24x80 if unknown
 
-// ---- Misc --------------------------------------------------------------------
+// ---- Programs ----------------------------------------------------------------
 
-// Where minimodem is installed
 const char* minimodemPath();
+const char* direwolfPath();
+const char* atestPath();
+const char* genPacketsPath();
+std::string executableDir();          // "" if unknown
 
 } // namespace os
 

@@ -1,20 +1,25 @@
-//
-// Created by dooli on 2026/10/07.
-//
-
+// cat.h - Radio control through Hamlib.
 #ifndef HAMPROOF_CAT_H
 #define HAMPROOF_CAT_H
 
 #include <string>
+#include <vector>
 
 #include <hamlib/rig.h>
 
-// CAT control of a radio through Hamlib. Every call talks to the radio and throws
-// std::runtime_error with Hamlib's message if the radio rejects it or doesn't answer.
+struct RadioModel {
+    rig_model_t model;
+    const char* name;
+};
+
+const std::vector<RadioModel>& commonRadios();
+// "" if Hamlib doesn't know the model
+std::string radioName(rig_model_t model);
+
+// Every call throws std::runtime_error on failure
 class Cat {
 public:
-    // model: Hamlib model number (1 = dummy rig, 2 = rigctld)
-    // port:  serial device (COM5, /dev/ttyACM0, /dev/pts/N) or host:port for model 2
+    // model 1 = dummy rig, 2 = rigctld (port is host:port)
     Cat(rig_model_t model, const std::string& port, int baud = 19200);
     ~Cat();
 
@@ -36,8 +41,7 @@ private:
     RIG* rig_;
 };
 
-// Keys the transmitter for as long as it exists, so the radio is unkeyed even if
-// the code in between throws or returns early.
+// Keys PTT while it exists
 class PttGuard {
 public:
     explicit PttGuard(Cat& cat) : cat_(cat) { cat_.setPtt(true); }

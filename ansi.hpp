@@ -1,8 +1,8 @@
-// ansi.hpp - Small header-only helper for colored/styled terminal output
-// using ANSI escape codes. Escape codes are skipped automatically when stdout
-// is not a terminal (e.g. "./HamProof > out.txt") or NO_COLOR is set.
+// ansi.hpp - Terminal colors, menus and text input. Escape codes are skipped when stdout
+// isn't a terminal or NO_COLOR is set.
 #pragma once
 
+#include <chrono>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -132,106 +132,244 @@ inline void flush() { std::fflush(stdout); }
 // Raw mode: keys arrive one at a time, without waiting for Enter and without echo
 inline void setRawMode(bool enable) { os::setRawMode(enable); }
 
-enum class Key { Up, Down, Enter, Quit, Other };
+enum class Key { Up, Down, PageUp, PageDown, Home, End, Enter, Back, Digit, Other };
 
-// Reads one key press. Arrow keys arrive as "ESC [ A" (or "ESC O A")
-inline Key readKey() {
-    int c = std::getchar();
+struct KeyPress {
+    Key key;
+    int digit = 0;   // For Key::Digit
+};
+
+// Reads one key press; raw mode must be on. A lone ESC is the Esc key
+inline KeyPress readKey() {
+    int c = os::readInputByte();
     switch (c) {
-        case EOF:
-        case 'q':
-            return Key::Quit;
-        case '\n':
-        case '\r':
-            return Key::Enter;
-        case 'k': return Key::Up;
-        case 'j': return Key::Down;
+        case -1:                      // stdin closed
+        case 3:                       // Ctrl-C (menus turn off the interrupt key)
+        case 'q': case 'Q':
+        case 8: case 127:             // Backspace
+            return {Key::Back};
+        case '\r': case '\n': case ' ':
+            return {Key::Enter};
+        case 'k': return {Key::Up};
+        case 'j': return {Key::Down};
         case 27: {
-            int next = std::getchar();
-            if (next != '[' && next != 'O') return Key::Other;
-            switch (std::getchar()) {
-                case 'A': return Key::Up;
-                case 'B': return Key::Down;
-                default:  return Key::Other;
+            if (!os::waitForInput(50)) return {Key::Back};
+            int next = os::readInputByte();
+            if (next != '[' && next != 'O') return {Key::Other};
+            std::string params;
+            int final = os::readInputByte();
+            while (final != -1 && (final < 0x40 || final > 0x7e)) {
+                params += static_cast<char>(final);
+                final = os::readInputByte();
+            }
+            switch (final) {
+                case 'A': return {Key::Up};
+                case 'B': return {Key::Down};
+                case 'C': return {Key::Enter};    // Right arrow goes into an item
+                case 'D': return {Key::Back};     // Left arrow comes back out
+                case 'H': return {Key::Home};
+                case 'F': return {Key::End};
+                case '~':
+                    if (params == "5") return {Key::PageUp};
+                    if (params == "6") return {Key::PageDown};
+                    if (params == "1" || params == "7") return {Key::Home};
+                    if (params == "4" || params == "8") return {Key::End};
+                    return {Key::Other};
+                default:  return {Key::Other};
             }
         }
         default:
-            return Key::Other;
+            if (c >= '0' && c <= '9') return {Key::Digit, c - '0'};
+            return {Key::Other};
     }
+}
+
+// Waits for any key. Swallows the rest of an escape sequence so it isn't read later
+inline void waitKey(const char* message = "Press any key") {
+    setRawMode(true);
+    os::setInterruptKey(false);
+    print(Color::Gray, "\n%s", message);
+    flush();
+    int c = os::readInputByte();
+    if (c == 27) {
+        while (os::waitForInput(30)) os::readInputByte();
+    }
+    std::printf("\n");
+    setRawMode(false);                // Also turns the interrupt key back on
 }
 
 // ---- Selection menu ----------------------------------------------------------
 
-struct MenuColors {
-    Color title  = Color::BrightRed;
-    Color item   = Color::BrightGreen;
-    Color cursor = Color::BrightRed;
-};
-
 inline const char* toCStr(const char* s)        { return s; }
 inline const char* toCStr(const std::string& s) { return s.c_str(); }
 
-// Core menu. label(i) returns the text for option i, so options can be any type.
-// Returns the chosen index, or -1 if the user pressed 'q'.
+// Cuts text to fit in width columns, counting UTF-8 characters rather than bytes
+inline std::string fitWidth(const std::string& text, int width) {
+    if (width < 1) return "";
+    int chars = 0;
+    for (size_t i = 0; i < text.size(); i++) {
+        if ((static_cast<unsigned char>(text[i]) & 0xC0) == 0x80) continue;
+        if (++chars > width) return text.substr(0, i);
+    }
+    return text;
+}
+
+namespace detail {
+// Ends a menu line, clearing whatever a longer line from the last frame left there
+inline void endLine() {
+    esc("\033[K");
+    std::printf("\n");
+}
+} // namespace detail
+
+// Menu. label(i) gives option i's text. Returns the chosen index, or -1 on Esc.
+// Typing a number jumps to that item, and picks it once no more digits could follow.
 template <class LabelFn>
-int selectWith(const char* title, int count, LabelFn label, int initial = 0,
-               MenuColors colors = {}) {
+int selectWith(const std::string& title, int count, LabelFn label, int initial = 0,
+               const std::string& subtitle = "") {
     if (count <= 0) return -1;
     int selection = (initial >= 0 && initial < count) ? initial : 0;
+    int top = 0;
+    int typed = 0;                    // The number typed so far
+    auto lastDigit = std::chrono::steady_clock::now();
+    int numberWidth = static_cast<int>(std::to_string(count).size());
     int result = -1;
     bool done = false;
 
     setRawMode(true);
+    os::setInterruptKey(false);
     hideCursor();
+    clearScreen();
     while (!done) {
-        clearScreen();                      // Redraw the whole menu each keypress
-        print(colors.title, "%s (Up/Down, Enter, q to quit):\n", title);
-        for (int i = 0; i < count; i++) {
-            if (i == selection) {
-                print(colors.cursor, "-> ");
-                print(colors.item, Bold | Inverse, "%s", toCStr(label(i)));
-                std::printf("\n");
-            } else {
-                print(colors.item, "   %s\n", toCStr(label(i)));
-            }
+        os::TerminalSize size = os::terminalSize();
+        int headerLines = subtitle.empty() ? 2 : 3;
+        int visible = size.rows - headerLines - 3;    // 2 scroll markers + the help line
+        if (visible < 3) visible = 3;
+        if (selection < top) top = selection;
+        if (selection >= top + visible) top = selection - visible + 1;
+        if (top > count - visible) top = count - visible > 0 ? count - visible : 0;
+
+        esc("\033[H");                                // Draw over the last frame: no flicker
+        print(Color::BrightRed, Bold, "%s", fitWidth(title, size.cols - 1).c_str());
+        detail::endLine();
+        if (!subtitle.empty()) {
+            print(Color::Gray, "%s", fitWidth(subtitle, size.cols - 1).c_str());
+            detail::endLine();
         }
+        detail::endLine();
+
+        if (top > 0) print(Color::Gray, "   ^ %d more", top);
+        detail::endLine();
+        int end = top + visible < count ? top + visible : count;
+        for (int i = top; i < end; i++) {
+            char number[16];
+            std::snprintf(number, sizeof number, "%*d  ", numberWidth, i + 1);
+            std::string text = fitWidth(number + std::string(toCStr(label(i))), size.cols - 4);
+            if (i == selection) {
+                print(Color::BrightRed, "-> ");
+                print(Color::BrightGreen, Bold | Inverse, "%s", text.c_str());
+            } else {
+                print(Color::BrightGreen, "   %s", text.c_str());
+            }
+            detail::endLine();
+        }
+        if (end < count) print(Color::Gray, "   v %d more", count - end);
+        detail::endLine();
+        print(Color::Gray, "%s", fitWidth("Up/Down move  Enter select  Esc back  "
+                                          "type a number to jump", size.cols - 1).c_str());
+        esc("\033[K\033[J");                          // Clear anything left below
         flush();
 
-        switch (readKey()) {
-            case Key::Up:                   // Wrap around at the top and bottom
-                selection = (selection - 1 + count) % count;
+        KeyPress press = readKey();
+        if (press.key != Key::Digit) typed = 0;
+        switch (press.key) {
+            case Key::Up:       selection = (selection - 1 + count) % count; break;
+            case Key::Down:     selection = (selection + 1) % count;         break;
+            case Key::PageUp:   selection = selection > visible ? selection - visible : 0; break;
+            case Key::PageDown: selection = selection + visible < count ? selection + visible
+                                                                        : count - 1; break;
+            case Key::Home:     selection = 0;         break;
+            case Key::End:      selection = count - 1; break;
+            case Key::Enter:    result = selection; done = true; break;
+            case Key::Back:     done = true; break;
+            case Key::Digit: {
+                auto now = std::chrono::steady_clock::now();
+                if (now - lastDigit > std::chrono::milliseconds(1200)) typed = 0;
+                lastDigit = now;
+                typed = typed * 10 + press.digit;
+                if (typed > count) typed = press.digit;      // Too big: start a new number
+                if (typed >= 1 && typed <= count) {
+                    selection = typed - 1;
+                    if (typed * 10 > count) {                // No more digits could follow
+                        result = selection;
+                        done = true;
+                    }
+                } else {
+                    typed = 0;
+                }
                 break;
-            case Key::Down:
-                selection = (selection + 1) % count;
-                break;
-            case Key::Enter:
-                result = selection;
-                done = true;
-                break;
-            case Key::Quit:
-                done = true;
-                break;
-            case Key::Other:
-                break;
+            }
+            case Key::Other:    break;
         }
     }
     showCursor();
-    setRawMode(false);
+    clearScreen();
+    setRawMode(false);                // Also turns the interrupt key back on
     return result;
 }
 
 // Any container of strings: C arrays, std::array, std::vector<const char*>, std::vector<std::string>
 template <class Container>
-int select(const char* title, const Container& options, int initial = 0, MenuColors colors = {}) {
+int select(const std::string& title, const Container& options, int initial = 0,
+           const std::string& subtitle = "") {
     return selectWith(title, static_cast<int>(std::size(options)),
-                      [&](int i) { return std::begin(options)[i]; }, initial, colors);
+                      [&](int i) { return std::begin(options)[i]; }, initial, subtitle);
 }
 
 // Inline list: ansi::select("Mode", {"RTTY", "Bell 103", "Bell 202"})
-inline int select(const char* title, std::initializer_list<const char*> options,
-                  int initial = 0, MenuColors colors = {}) {
+inline int select(const std::string& title, std::initializer_list<const char*> options,
+                  int initial = 0, const std::string& subtitle = "") {
     return selectWith(title, static_cast<int>(options.size()),
-                      [&](int i) { return options.begin()[i]; }, initial, colors);
+                      [&](int i) { return options.begin()[i]; }, initial, subtitle);
+}
+
+// ---- Text input --------------------------------------------------------------
+
+// Edits value. Enter saves (true), Esc cancels (false), Ctrl-U clears.
+inline bool inputLine(const std::string& title, const std::string& prompt, std::string& value) {
+    std::string text = value;
+    setRawMode(true);
+    os::setInterruptKey(false);
+    bool accepted = false;
+    for (;;) {
+        clearScreen();
+        print(Color::BrightRed, Bold, "%s\n", title.c_str());
+        print(Color::Gray, "%s\n\n", prompt.c_str());
+        print(Color::BrightGreen, "> %s", text.c_str());
+        flush();
+
+        int c = os::readInputByte();
+        if (c == '\r' || c == '\n') { accepted = true; break; }
+        if (c == -1 || c == 3) break;
+        if (c == 27) {
+            if (!os::waitForInput(50)) break;                 // Esc on its own: cancel
+            while (os::waitForInput(30)) os::readInputByte(); // Arrow keys etc.: ignore
+            continue;
+        }
+        if (c == 21) { text.clear(); continue; }              // Ctrl-U
+        if (c == 8 || c == 127) {
+            // Remove one whole UTF-8 character
+            while (!text.empty() && (static_cast<unsigned char>(text.back()) & 0xC0) == 0x80)
+                text.pop_back();
+            if (!text.empty()) text.pop_back();
+            continue;
+        }
+        if (c >= 32) text += static_cast<char>(c);
+    }
+    clearScreen();
+    setRawMode(false);
+    if (accepted) value = text;
+    return accepted;
 }
 
 } // namespace ansi

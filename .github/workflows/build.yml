@@ -19,10 +19,12 @@ concurrency:
 
 env:
   HAMLIB_VERSION: "4.7.2"
+  DIREWOLF_VERSION: "1.8.1"
 
 jobs:
   # Skips the nightly when nothing was committed since the last one
   changes:
+    name: Check for new commits
     runs-on: ubuntu-latest
     outputs:
       release: ${{ steps.check.outputs.release }}
@@ -46,6 +48,7 @@ jobs:
           fi
 
   windows:
+    name: Windows x64
     runs-on: windows-latest
     defaults:
       run:
@@ -70,26 +73,49 @@ jobs:
           echo "8553bc6c5c6032e8debf99c017e98f58fed7e07e7c25d04815dc3e8bbe3304c7  hamlib-w64-${HAMLIB_VERSION}.zip" | sha256sum -c
           unzip -q "hamlib-w64-${HAMLIB_VERSION}.zip"
 
+      # The build makes direwolf with Hamlib from source (the official Windows download
+      # has no Hamlib). The direwolf folder isn't in the repository, so fetch the release
+      - name: Download direwolf source
+        run: |
+          curl -fsSL -o direwolf.tar.gz "https://github.com/wb2osz/direwolf/archive/refs/tags/${DIREWOLF_VERSION}.tar.gz"
+          echo "89d5f7992ae1e74d8cf26ec6479dde74d1f480bde950043756e875a689d065d7  direwolf.tar.gz" | sha256sum -c
+          mkdir direwolf
+          tar xzf direwolf.tar.gz -C direwolf --strip-components=1
+
       - name: Build
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHAMPROOF_STATIC=ON
           cmake --build build
 
-      - name: Check
+      # There's no minimodem build for this runner, so its cases report "skipped"; the
+      # packet cases are decoded with the atest built above
+      # -V prints every case, so the log shows each result, not just pass/fail. The test
+      # program also writes a table to the job summary and annotates any failure
+      - name: Unit tests
+        run: ctest --test-dir build -R "^unit$" -V
+
+      - name: Audio tests (decode tests/audio with minimodem and atest)
+        if: success() || failure()          # Still run when the unit tests failed
+        run: ctest --test-dir build -R "^audio$" -V
+
+      - name: CAT test (Hamlib dummy rig)
+        if: success() || failure()
         run: build/cat_test.exe x 1
 
       - name: Package
         run: |
-          mkdir -p dist/RTTY-Connector
-          cp build/*.exe build/*.dll README.md LICENSE dist/RTTY-Connector/
-          cd dist && zip -qr RTTY-Connector-windows-x64.zip RTTY-Connector
+          mkdir -p dist/Radio-to-Text-Connector
+          cp build/RadioToTextConnector.exe build/cat_test.exe build/direwolf.exe build/atest.exe build/gen_packets.exe build/*.dll README.md LICENSE dist/Radio-to-Text-Connector/
+          cp -r build/test-audio dist/Radio-to-Text-Connector/
+          cd dist && zip -qr Radio-to-Text-Connector-windows-x64.zip Radio-to-Text-Connector
 
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: dist/RTTY-Connector-windows-x64.zip
+          path: dist/Radio-to-Text-Connector-windows-x64.zip
 
   linux:
+    name: Linux x64
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -98,6 +124,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential ninja-build pkg-config libasound2-dev libusb-1.0-0-dev libudev-dev
+          # Only for the audio tests, which decode tests/audio with them
+          sudo apt-get install -y minimodem direwolf
           # CMakeLists.txt asks for CMake 4.1 or newer, newer than Ubuntu's
           pipx install cmake
           cmake --version
@@ -129,23 +157,36 @@ jobs:
                 -DCMAKE_PREFIX_PATH="$HOME/hamlib"
           cmake --build build
 
-      - name: Check
-        run: |
-          ldd build/HamProof
-          build/cat_test x 1
+      - name: Show linked libraries
+        run: ldd build/RadioToTextConnector
+
+      # -V prints every case, so the log shows each result, not just pass/fail. The test
+      # program also writes a table to the job summary and annotates any failure
+      - name: Unit tests
+        run: ctest --test-dir build -R "^unit$" -V
+
+      - name: Audio tests (decode tests/audio with minimodem and atest)
+        if: success() || failure()          # Still run when the unit tests failed
+        run: ctest --test-dir build -R "^audio$" -V
+
+      - name: CAT test (Hamlib dummy rig)
+        if: success() || failure()
+        run: build/cat_test x 1
 
       - name: Package
         run: |
-          mkdir -p dist/RTTY-Connector
-          cp build/HamProof build/cat_test README.md LICENSE APT-PACKAGES.txt dist/RTTY-Connector/
-          tar -C dist -czf dist/RTTY-Connector-linux-x64.tar.gz RTTY-Connector
+          mkdir -p dist/Radio-to-Text-Connector
+          cp build/RadioToTextConnector build/cat_test README.md LICENSE APT-PACKAGES.txt dist/Radio-to-Text-Connector/
+          cp -r build/test-audio dist/Radio-to-Text-Connector/
+          tar -C dist -czf dist/Radio-to-Text-Connector-linux-x64.tar.gz Radio-to-Text-Connector
 
       - uses: actions/upload-artifact@v4
         with:
           name: linux
-          path: dist/RTTY-Connector-linux-x64.tar.gz
+          path: dist/Radio-to-Text-Connector-linux-x64.tar.gz
 
   macos:
+    name: macOS (Apple Silicon)
     runs-on: macos-latest        # Apple Silicon
     steps:
       - uses: actions/checkout@v4
@@ -155,6 +196,8 @@ jobs:
           brew update
           # minimodem pulls in PulseAudio, which the device list links against
           brew install cmake ninja pkgconf hamlib minimodem
+          # Only for the packet audio tests; they're skipped if it can't be installed
+          brew install direwolf || echo "direwolf not installed; packet audio tests will be skipped"
           cmake --version
 
       - name: Build
@@ -162,23 +205,36 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHAMPROOF_STATIC=ON
           cmake --build build
 
-      - name: Check
-        run: |
-          otool -L build/HamProof
-          build/cat_test x 1
+      - name: Show linked libraries
+        run: otool -L build/RadioToTextConnector
+
+      # -V prints every case, so the log shows each result, not just pass/fail. The test
+      # program also writes a table to the job summary and annotates any failure
+      - name: Unit tests
+        run: ctest --test-dir build -R "^unit$" -V
+
+      - name: Audio tests (decode tests/audio with minimodem and atest)
+        if: success() || failure()          # Still run when the unit tests failed
+        run: ctest --test-dir build -R "^audio$" -V
+
+      - name: CAT test (Hamlib dummy rig)
+        if: success() || failure()
+        run: build/cat_test x 1
 
       - name: Package
         run: |
-          mkdir -p dist/RTTY-Connector
-          cp build/HamProof build/cat_test README.md LICENSE dist/RTTY-Connector/
-          tar -C dist -czf dist/RTTY-Connector-macos-arm64.tar.gz RTTY-Connector
+          mkdir -p dist/Radio-to-Text-Connector
+          cp build/RadioToTextConnector build/cat_test README.md LICENSE dist/Radio-to-Text-Connector/
+          cp -r build/test-audio dist/Radio-to-Text-Connector/
+          tar -C dist -czf dist/Radio-to-Text-Connector-macos-arm64.tar.gz Radio-to-Text-Connector
 
       - uses: actions/upload-artifact@v4
         with:
           name: macos
-          path: dist/RTTY-Connector-macos-arm64.tar.gz
+          path: dist/Radio-to-Text-Connector-macos-arm64.tar.gz
 
   release:
+    name: Publish nightly release
     needs: [changes, windows, linux, macos]
     if: needs.changes.outputs.release == 'true'
     runs-on: ubuntu-latest
@@ -199,15 +255,16 @@ jobs:
           cat > notes.md <<EOF
           Automatic build of \`${short}\` from ${today}. Untested; may be broken.
 
-          **Windows:** unzip and run \`HamProof.exe\`. Keep the DLLs next to it. minimodem
+          **Windows:** unzip and run \`RadioToTextConnector.exe\`. Keep the DLLs and the
+          direwolf programs next to it (direwolf is included, built with Hamlib). minimodem
           has to be installed separately (Cygwin build).
 
-          **Linux:** \`tar xzf\`, then \`./HamProof\`. Needs ALSA, libusb and minimodem
-          (see APT-PACKAGES.txt).
+          **Linux:** \`tar xzf\`, then \`./RadioToTextConnector\`. Needs ALSA, libusb, and
+          minimodem and/or direwolf (see APT-PACKAGES.txt).
 
-          **macOS (Apple Silicon):** \`brew install hamlib minimodem && brew services start pulseaudio\`,
-          then \`tar xzf\` and \`./HamProof\`. If macOS blocks it, run
-          \`xattr -d com.apple.quarantine HamProof cat_test\` first.
+          **macOS (Apple Silicon):** \`brew install hamlib minimodem direwolf && brew services start pulseaudio\`,
+          then \`tar xzf\` and \`./RadioToTextConnector\`. If macOS blocks it, run
+          \`xattr -d com.apple.quarantine RadioToTextConnector cat_test\` first.
           EOF
           # Replace the previous nightly (release and tag) with this one
           gh release delete nightly --cleanup-tag --yes || true
