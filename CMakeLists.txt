@@ -8,6 +8,13 @@ set(CMAKE_CXX_STANDARD 20)
 # fails on some of our files, which broke the Windows CI build
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
+# Windows: programs and the DLLs copied next to them go in build/bin. Hamlib ships old
+# libgcc_s_seh-1.dll and libwinpthread-1.dll, and the compiler runs in build/, where
+# Windows would load those before its own and crash
+if(WIN32)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 # -DHAMPROOF_STATIC=ON links the C++ runtime (and Hamlib on Linux) into the exe.
 # Windows (MinGW) builds always link the runtime statically
 option(HAMPROOF_STATIC "Link libraries statically where possible" OFF)

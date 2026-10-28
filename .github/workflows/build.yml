@@ -100,13 +100,13 @@ jobs:
 
       - name: CAT test (Hamlib dummy rig)
         if: success() || failure()
-        run: build/cat_test.exe x 1
+        run: build/bin/cat_test.exe x 1
 
       - name: Package
         run: |
           mkdir -p dist/Radio-to-Text-Connector
-          cp build/RadioToTextConnector.exe build/cat_test.exe build/direwolf.exe build/atest.exe build/gen_packets.exe build/*.dll README.md LICENSE dist/Radio-to-Text-Connector/
-          cp -r build/test-audio dist/Radio-to-Text-Connector/
+          cp build/bin/RadioToTextConnector.exe build/bin/cat_test.exe build/bin/direwolf.exe build/bin/atest.exe build/bin/gen_packets.exe build/bin/*.dll README.md LICENSE dist/Radio-to-Text-Connector/
+          cp -r build/bin/test-audio dist/Radio-to-Text-Connector/
           cd dist && zip -qr Radio-to-Text-Connector-windows-x64.zip Radio-to-Text-Connector
 
       - uses: actions/upload-artifact@v4
