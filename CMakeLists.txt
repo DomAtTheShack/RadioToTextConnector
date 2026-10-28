@@ -4,6 +4,9 @@ cmake_minimum_required(VERSION 4.1)
 project(RadioToTextConnector)
 
 set(CMAKE_CXX_STANDARD 20)
+# No C++20 modules here. CMake scans for them anyway with Ninja, and GCC 16's scanner
+# fails on some of our files, which broke the Windows CI build
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 # -DHAMPROOF_STATIC=ON links the C++ runtime (and Hamlib on Linux) into the exe.
 # Windows (MinGW) builds always link the runtime statically
