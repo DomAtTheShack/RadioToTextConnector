@@ -27,7 +27,7 @@ jobs:
   # nothing was committed since the last one
   changes:
     name: Check for new commits
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       release: ${{ steps.check.outputs.release }}
     steps:
@@ -58,15 +58,15 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: UCRT64
           install: >-
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-cmake
-            mingw-w64-x86_64-ninja
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
             unzip
             zip
 
@@ -113,7 +113,7 @@ jobs:
           cp -r build/bin/test-audio dist/Radio-to-Text-Connector/
           cd dist && zip -qr Radio-to-Text-Connector-windows-x64.zip Radio-to-Text-Connector
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows
           path: dist/Radio-to-Text-Connector-windows-x64.zip
@@ -122,7 +122,7 @@ jobs:
     name: Linux x64
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install dependencies
         run: |
@@ -138,7 +138,7 @@ jobs:
       # inside the binary. Cached, so this only takes minutes the first time
       - name: Cache Hamlib
         id: hamlib-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/hamlib
           key: hamlib-${{ env.HAMLIB_VERSION }}-ubuntu-24.04-static
@@ -184,7 +184,7 @@ jobs:
           cp -r build/test-audio dist/Radio-to-Text-Connector/
           tar -C dist -czf dist/Radio-to-Text-Connector-linux-x64.tar.gz Radio-to-Text-Connector
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux
           path: dist/Radio-to-Text-Connector-linux-x64.tar.gz
@@ -193,11 +193,14 @@ jobs:
     name: macOS (Apple Silicon)
     runs-on: macos-latest        # Apple Silicon
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install dependencies
         run: |
           brew update
+          # The runner image links another OpenSSL's bin/openssl, so upgrading openssl@4
+          # (for PulseAudio) would overwrite it with a warning. Unlink them all first
+          for keg in $(brew list --formula | grep '^openssl@' || true); do brew unlink "$keg"; done
           # minimodem pulls in PulseAudio, which the device list links against
           brew install cmake ninja pkgconf hamlib minimodem
           # Only for the packet audio tests; they're skipped if it can't be installed
@@ -232,7 +235,7 @@ jobs:
           cp -r build/test-audio dist/Radio-to-Text-Connector/
           tar -C dist -czf dist/Radio-to-Text-Connector-macos-arm64.tar.gz Radio-to-Text-Connector
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos
           path: dist/Radio-to-Text-Connector-macos-arm64.tar.gz
@@ -241,9 +244,9 @@ jobs:
     name: Publish nightly release
     needs: [changes, windows, linux, macos]
     if: needs.changes.outputs.release == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
