@@ -15,7 +15,7 @@ using namespace std::chrono_literals;
 // Key-up covers the channel wait and TXDELAY; tail covers TXTAIL and sound card buffering
 constexpr auto keyUp = 1s;
 constexpr auto tail = 1s;
-constexpr auto ackDelay = 2s;          // After the last part heard
+constexpr auto ackDelay = 2s;          // After the last part we expect
 constexpr auto collectTimeout = 2min;  // With no new part heard
 constexpr auto remember = 10min;       // Finished message IDs
 constexpr auto resultGrace = 30s;      // On top of the other side's hold time
@@ -346,7 +346,7 @@ void Engine::onFrame(const packet::Frame& frame, TimePoint now) {
         in.have[index] = true;
         in.path = frame.path;
         if (!allTrue(in.have)) {
-            in.ackAt = now + ackDelay;
+            in.ackAt = now + ackWait(in, air->part, frame.path.size());
             return;
         }
         for (const std::string& part : in.parts) in.text += part;
@@ -539,6 +539,14 @@ TimePoint Engine::transmitFrame(const std::string& destination, const std::strin
     TimePoint start = busyUntil > now ? busyUntil : now + keyUp;
     busyUntil = start + toDuration(packet::airtime(bytes, opts.baud, opts.fx25));
     return busyUntil + tail;
+}
+
+// Parts go out back to back in order, so the ones still missing after this part may
+// be on the air right now. Wait for them, or at 300 baud we'd ack after every part
+Clock::duration Engine::ackWait(const Incoming& in, int part, size_t pathHops) const {
+    auto still = std::count(in.have.begin() + part, in.have.end(), false);
+    size_t bytes = frameHeaderBytes + pathHops * addressBytes + dataHeaderBytes + partBytes(opts.fx25, pathHops);
+    return ackDelay + still * toDuration(packet::airtime(bytes, opts.baud, opts.fx25));
 }
 
 void Engine::setState(Outgoing& msg, State state, const std::string& reason) {

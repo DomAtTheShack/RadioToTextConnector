@@ -707,6 +707,64 @@ void testConnectorOneAtATime() {
     CHECK(air.a.engine->txQueue() == 0);
 }
 
+// At 300 baud one full part takes ~7 s, so the receiver must not ack between parts
+void testConnectorSlowAck() {
+    using namespace std::chrono;
+    struct Rx {
+        std::vector<std::pair<double, std::string>> acks;   // When, which parts
+        connector::TimePoint start{}, now{};
+        connector::Engine engine;
+        Rx() : engine({[this](const std::string&, const std::string& info) {
+                           auto air = connector::parseAir(info);
+                           if (air && air->kind == connector::AirFrame::Kind::Ack)
+                               acks.push_back({duration<double>(now - start).count(), connector::formatRanges(air->parts)});
+                           return true;
+                       },
+                       [](const connector::Json&) {}}, 0x20) {
+            connector::Options o;
+            o.callsign = "K1ABC-3";
+            o.baud = 300;
+            engine.setOptions(o);
+            engine.setRadioReady(true, now);
+        }
+        void runTo(double seconds) {
+            while (duration<double>(now - start).count() < seconds) {
+                now += milliseconds(100);
+                engine.tick(now);
+            }
+        }
+        void hear(int part) {
+            engine.onFrame({"N0CALL-7", "K1ABC-3", {}, connector::formatData(0x10, part, 4, "x")}, now);
+        }
+    };
+    const double gap = 6.5;
+
+    Rx all;   // Every part heard: one ack, once the last is in
+    for (int part = 1; part <= 4; part++) {
+        all.runTo(gap * (part - 1));
+        all.hear(part);
+    }
+    all.runTo(gap * 3 + 10);
+    CHECK(all.acks.size() == 1);
+    CHECK(!all.acks.empty() && all.acks[0].first >= gap * 3 && all.acks[0].second == "1-4");
+
+    Rx middle;   // Part 2 lost: the gap from 1 to 3 is two parts long
+    for (int part : {1, 3, 4}) {
+        middle.runTo(gap * (part - 1));
+        middle.hear(part);
+    }
+    middle.runTo(gap * 3 + 10);
+    CHECK(middle.acks.size() == 1);
+    CHECK(!middle.acks.empty() && middle.acks[0].first > gap * 3 && middle.acks[0].second == "1,3-4");
+
+    Rx tail;   // Parts 2-4 lost: ack part 1 once they'd have been heard
+    tail.hear(1);
+    tail.runTo(60);
+    CHECK(tail.acks.size() == 1);
+    CHECK(!tail.acks.empty() && tail.acks[0].first > gap * 3 && tail.acks[0].first < 30);
+    CHECK(!tail.acks.empty() && tail.acks[0].second == "1");
+}
+
 void testConnectorRequests() {
     Air air;
     auto lastError = [&] { return air.a.toMain.back()["body"]; };
@@ -803,6 +861,7 @@ int runUnit() {
         {"Connector main reconnect", testConnectorReconnect},
         {"Connector lost result", testConnectorLostResult},
         {"Connector one message at a time", testConnectorOneAtATime},
+        {"Connector waits at 300 baud before acking", testConnectorSlowAck},
         {"Connector request errors", testConnectorRequests},
         {"Connector config", testConnectorConfig},
     };

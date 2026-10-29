@@ -148,6 +148,7 @@ private:
     void finishIncoming(Incoming& in, const std::string& result, TimePoint now);
     void deliver(Incoming& in);
     void sendAck(const Incoming& in, TimePoint now);
+    Clock::duration ackWait(const Incoming& in, int part, size_t pathHops) const;
     Outgoing* active();
     unsigned allocateId();
     static bool final(State state);
