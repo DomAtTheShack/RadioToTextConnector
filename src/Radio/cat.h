@@ -1,6 +1,6 @@
 // cat.h - Radio control through Hamlib.
-#ifndef HAMPROOF_CAT_H
-#define HAMPROOF_CAT_H
+#ifndef RTC_CAT_H
+#define RTC_CAT_H
 
 #include <string>
 #include <vector>
@@ -57,4 +57,4 @@ private:
 };
 
 
-#endif //HAMPROOF_CAT_H
+#endif //RTC_CAT_H

@@ -20,13 +20,13 @@
 #include <string>
 #include <thread>
 
-#include "backend.h"
-#include "cat.h"
+#include "../backend.h"
+#include "../Radio/cat.h"
 #include "connector.h"
 #include "connector_config.h"
-#include "modem.h"
+#include "../Radio/modem.h"
 #include "packet.h"
-#include "settings.h"
+#include "../settings.h"
 
 namespace fs = std::filesystem;
 using connector::Json;
@@ -43,7 +43,10 @@ constexpr auto direwolfStartLimit = 15s;
 constexpr auto radioRetryDelay = 10s;
 
 std::atomic<bool> quitRequested{false};
-bool verbose = false;
+bool verbose = false;        // rx/tx frames and JSON lines
+bool showDirewolf = false;   // direwolf's own output
+bool quitOnDisconnect = false;   // RadioTests: stop (and stop direwolf) when it hangs up
+std::string settingsFile;   // connector.ini, or --settings
 
 void onSignal(int) { quitRequested = true; }
 
@@ -267,6 +270,7 @@ public:
                         std::string(os::direwolfPath()));
         }
         direwolfRunning = true;
+        partialLine.clear();
         int gen = generation;
         outputReader = std::thread([this, gen] {
             char buffer[512];
@@ -344,7 +348,17 @@ public:
         if (event.generation != generation) return;
         log += event.text;
         if (log.size() > 4000) log.erase(0, log.size() - 4000);
-        if (verbose) std::fwrite(event.text.data(), 1, event.text.size(), stderr);
+        if (!showDirewolf) return;
+        // Whole lines with a prefix, so they don't run into our own log lines. direwolf
+        // buffers its output, so these can show up a few seconds late
+        partialLine += event.text;
+        size_t newline;
+        while ((newline = partialLine.find('\n')) != std::string::npos) {
+            std::string line = partialLine.substr(0, newline);
+            partialLine.erase(0, newline + 1);
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (!line.empty()) logLine("direwolf: %s", line.c_str());
+        }
     }
 
     // direwolf exited or closed its KISS port when it shouldn't have
@@ -437,6 +451,7 @@ private:
     TimePoint startDeadline{}, nextConnectTry{};
     std::optional<TimePoint> retryAt;
     std::string log;
+    std::string partialLine;   // direwolf output after the last newline, for --direwolf
     bool transmitted = false;
 };
 
@@ -457,7 +472,8 @@ public:
         int port = 0;
         connector::parseHostPort(settings.mainAddress, host, port);
         logLine("Radio Connector %s, main program at %s:%d", programVersion, host.c_str(), port);
-        logLine("settings: %s", settingsPath().c_str());
+        logLine("settings: %s (callsign %s)", settingsFile.c_str(),
+                settings.callsign.empty() ? "not set" : settings.callsign.c_str());
         radio.start(settings, false);
         main.start(host, port);
 
@@ -490,8 +506,13 @@ private:
                 lastStatus = nullptr;   // Full status next
                 break;
             case Event::Type::MainClosed:
-                logLine("main program disconnected; trying again every 5 s");
                 engine.setMainConnected(false, now);
+                if (quitOnDisconnect) {
+                    logLine("main program disconnected; quitting");
+                    quitRequested = true;
+                    break;
+                }
+                logLine("main program disconnected; trying again every 5 s");
                 break;
             case Event::Type::MainFailed:
                 logLine("can't reach the main program (%s); trying every 5 s", event.text.c_str());
@@ -553,7 +574,7 @@ private:
             connector::ConfigChange change = connector::applyConfig(changed, body["config"]);
             if (!change.ok) return reply(connector::errorEnvelope(id, "bad_field", change.message, change.field));
             settings = changed;
-            if (!saveSettings(settings)) logLine("WARNING: couldn't save %s", settingsPath().c_str());
+            if (!saveSettingsTo(settings, settingsFile)) logLine("WARNING: couldn't save %s", settingsFile.c_str());
             engine.setOptions(connector::engineOptions(settings));
             reply(connector::envelope("config", {{"config", connector::configToJson(settings)},
                                                  {"restartRequired", change.restartRequired}}, nullptr, id));
@@ -630,32 +651,69 @@ private:
 
 void usage(const char* program) {
     std::fprintf(stderr,
-                 "Usage: %s [--main host:port] [--verbose]\n"
+                 "Usage: %s [--settings file] [--main host:port] [--verbose] [--direwolf]\n"
+                 "  --settings file   settings to use instead of %s\n"
                  "  --main host:port  where the main program listens (saved for next time)\n"
-                 "  --verbose         log every frame, JSON line and direwolf's output\n"
-                 "Settings: %s\n",
-                 program, settingsPath().c_str());
+                 "  --verbose         log every frame sent and heard, and every JSON line\n"
+                 "  --direwolf        also show direwolf's own output\n"
+                 "  --quit-on-disconnect  exit when the main program hangs up (for test programs)\n",
+                 program, connectorSettingsPath().c_str());
+}
+
+// The same callsign with another SSID (N8GM -> N8GM-1, N8GM-15 -> N8GM-1), so the
+// connector is a different station from RadioConnectorCli
+std::string otherSsid(const std::string& callsign) {
+    std::string call = packet::normalizeCallsign(callsign);
+    if (call.empty()) return callsign;
+    size_t dash = call.find('-');
+    int ssid = dash == std::string::npos ? 0 : std::atoi(call.c_str() + dash + 1);
+    return call.substr(0, dash) + "-" + std::to_string(ssid % 15 + 1);
+}
+
+// The first time, the connector's file starts as a copy of RadioConnectorCli's
+// settings (audio, PTT, baud), with its own callsign
+Settings loadConnectorSettings() {
+    bool found = false;
+    Settings settings = loadSettingsFrom(settingsFile, &found);
+    if (found) return settings;
+    settings = loadSettings();
+    std::string shared = settings.callsign;
+    settings.callsign = otherSsid(shared);
+    if (!saveSettingsTo(settings, settingsFile)) {
+        std::fprintf(stderr, "Couldn't create %s\n", settingsFile.c_str());
+        return settings;
+    }
+    std::fprintf(stderr, "Made %s from %s", settingsFile.c_str(), settingsPath().c_str());
+    if (!shared.empty())
+        std::fprintf(stderr, ", with callsign %s (RadioConnectorCli is %s)",
+                     settings.callsign.c_str(), packet::normalizeCallsign(shared).c_str());
+    std::fprintf(stderr, ". Edit it to change the connector's settings.\n");
+    return settings;
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
-    Settings settings = loadSettings();
+    settingsFile = connectorSettingsPath();
+    std::string mainAddress;
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "--main" && i + 1 < argc) {
-            std::string address = argv[++i], host;
+            mainAddress = argv[++i];
+            std::string host;
             int port = 0;
-            if (!connector::parseHostPort(address, host, port)) {
+            if (!connector::parseHostPort(mainAddress, host, port)) {
                 std::fprintf(stderr, "--main needs an IP address and port, e.g. 127.0.0.1:9000\n");
                 return 2;
             }
-            if (settings.mainAddress != address) {
-                settings.mainAddress = address;
-                if (!saveSettings(settings)) std::fprintf(stderr, "Couldn't save %s\n", settingsPath().c_str());
-            }
+        } else if (arg == "--settings" && i + 1 < argc) {
+            settingsFile = argv[++i];
         } else if (arg == "--verbose" || arg == "-v") {
             verbose = true;
+        } else if (arg == "--direwolf") {
+            showDirewolf = true;
+        } else if (arg == "--quit-on-disconnect") {
+            quitOnDisconnect = true;
         } else if (arg == "--version") {
             std::printf("radio-connector %s\n", programVersion);
             return 0;
@@ -663,6 +721,12 @@ int main(int argc, char** argv) {
             usage(argv[0]);
             return arg == "--help" || arg == "-h" ? 0 : 2;
         }
+    }
+    Settings settings = loadConnectorSettings();
+    if (!mainAddress.empty() && settings.mainAddress != mainAddress) {
+        settings.mainAddress = mainAddress;
+        if (!saveSettingsTo(settings, settingsFile))
+            std::fprintf(stderr, "Couldn't save %s\n", settingsFile.c_str());
     }
     std::string host;
     int port = 0;

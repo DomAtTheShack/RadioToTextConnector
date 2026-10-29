@@ -14,11 +14,11 @@
 
 #include "ansi.hpp"
 #include "backend.h"
-#include "cat.h"
-#include "fsk.h"
-#include "modem.h"
+#include "Radio/cat.h"
+#include "Radio/fsk.h"
+#include "Radio/modem.h"
 #include "options.h"
-#include "packet.h"
+#include "Connector/packet.h"
 #include "session.h"
 #include "settings.h"
 #include "testcases.h"
@@ -211,6 +211,8 @@ void printSessionHeader(const Settings& settings, bool onAir) {
                     settings.shift, settings.baud);
     }
     if (onAir) ansi::print(infoColor, "PTT: %s\n", pttDescription(settings).c_str());
+    if (settings.packet() && settings.transmits() && !settings.sendTo.empty())
+        ansi::print(infoColor, "Sending to %s\n", settings.sendTo.c_str());
     ansi::flush();
 }
 
@@ -229,13 +231,33 @@ bool pickCallsign(Settings& settings) {
     }
 }
 
+// Who typed packets go to: a station for testing a Radio Connector, else everyone
+string sendToAddress(const Settings& settings) {
+    return settings.sendTo.empty() ? packet::groupAddress : settings.sendTo;
+}
+
+// Empty = CQ. false on Esc
+bool pickSendTo(Settings& settings) {
+    string call = settings.sendTo;
+    string prompt = "Callsign, e.g. a Radio Connector's N0CALL-1. Empty = CQ (everyone)";
+    for (;;) {
+        if (!ansi::inputLine("Send to", prompt, call)) return false;
+        string normalized = packet::normalizeCallsign(call);
+        if (call.empty() || !normalized.empty()) {
+            settings.sendTo = normalized;
+            return true;
+        }
+        prompt = "\"" + call + "\" isn't a valid callsign. Empty = CQ (everyone)";
+    }
+}
+
 // Typed lines -> gen_packets input (direwolf monitor format)
-TransmitFormat genPacketsFormat(const string& callsign, int fx25) {
+TransmitFormat genPacketsFormat(const string& callsign, const string& destination, int fx25) {
     TransmitFormat format;
     format.name = "gen_packets";
     format.hideOutput = true;           // It echoes every packet
     size_t maxInfo = packet::maxInfoFor(fx25);
-    format.format = [callsign, maxInfo](const string& typed) {
+    format.format = [callsign, destination, maxInfo](const string& typed) {
         string out;
         size_t start = 0;
         while (start < typed.size()) {
@@ -244,7 +266,7 @@ TransmitFormat genPacketsFormat(const string& callsign, int fx25) {
             string line = typed.substr(start, end - start);
             start = end + 1;
             if (line.empty()) continue;
-            for (const string& packetLine : packet::monitorLines(callsign, packet::groupAddress, line, maxInfo))
+            for (const string& packetLine : packet::monitorLines(callsign, destination, line, maxInfo))
                 out += packetLine + "\n";
         }
         return out;
@@ -275,6 +297,7 @@ bool runDirewolf(const Settings& settings, const string& rxName, const string& t
     session.workingDir = config.parent_path().string();
     session.kissPort = kissPort;
     session.callsign = settings.callsign;
+    session.destination = sendToAddress(settings);
     session.baud = settings.packetBaud;
     session.fx25 = settings.fx25;
     bool transmitted = false;
@@ -316,7 +339,7 @@ void startPacketSession(Settings& settings) {
     if (useFile) {   // Transmit: write packets to the file
         printSessionHeader(settings, false);
         bool ok = runTransmit(genPacketsArgs(settings, file), nullptr, "", false,
-                              genPacketsFormat(settings.callsign, settings.fx25));
+                              genPacketsFormat(settings.callsign, sendToAddress(settings), settings.fx25));
         if (!ok) ansi::print(failColor, "\nStopped with an error.\n");
         ansi::waitKey();
         return;
@@ -561,8 +584,11 @@ void settingsMenu(Settings& settings) {
             items.push_back({"Callsign", s.callsign.empty() ? "(not set)" : s.callsign,
                              [&] { pickCallsign(s); }});
             // Only sending needs the setting: direwolf decodes FX.25 whenever it hears it
-            if (s.transmits())
+            if (s.transmits()) {
+                items.push_back({"Send to", s.sendTo.empty() ? "CQ (everyone)" : s.sendTo,
+                                 [&] { pickSendTo(s); }});
                 items.push_back({"FX.25", fx25Name(s.fx25), [&] { pickFx25(s); }});
+            }
         } else {
             items.push_back({"Protocol", protocolName(s.protocol), [&] {
                 int choice = ansi::select("Protocol", {"RTTY", "Bell202"},

@@ -15,8 +15,8 @@
 
 #include "ansi.hpp"
 #include "backend.h"
-#include "cat.h"
-#include "packet.h"
+#include "Radio/cat.h"
+#include "Connector/packet.h"
 
 namespace {
 
@@ -409,8 +409,12 @@ private:
         long n;
         while ((n = connection.read(buffer, sizeof buffer)) > 0) {
             for (const packet::Bytes& bytes : decoder.feed(std::string_view(buffer, static_cast<size_t>(n)))) {
-                if (auto frame = packet::decode(bytes))
-                    events.push({Event::Type::Packet, Key::Char, 0, frame->info, frame->source});
+                if (auto frame = packet::decode(bytes)) {
+                    // Show who it's for unless it's to everyone, e.g. an ack to this station
+                    std::string from = frame->source;
+                    if (frame->destination != packet::groupAddress) from += ">" + frame->destination;
+                    events.push({Event::Type::Packet, Key::Char, 0, frame->info, from});
+                }
             }
         }
         events.push({Event::Type::LinkClosed, Key::Char, 0, {}, {}});
@@ -573,14 +577,16 @@ bool runPacketSession(const PacketSession& p, bool& transmitted) {
             if (!line.empty() && line.back() == '\r') line.pop_back();
             if (line.empty()) continue;
             for (const std::string& piece : packet::splitInfo(line, packet::maxInfoFor(p.fx25))) {
-                packet::Bytes frame = packet::encodeUi(p.callsign, packet::groupAddress, piece);
+                packet::Bytes frame = packet::encodeUi(p.callsign, p.destination, piece);
                 if (!link.send(frame)) return false;
                 auto now = Clock::now();
                 Clock::time_point begins = busyUntil > now ? busyUntil : now + seconds(keyUpSeconds);
                 busyUntil = begins + seconds(packet::airtime(frame.size(), p.baud, p.fx25));
                 transmitted = true;
             }
-            screen.showPacket(p.callsign, line, sentColor);
+            screen.showPacket(p.destination == packet::groupAddress ? p.callsign
+                                                                    : p.callsign + ">" + p.destination,
+                              line, sentColor);
         }
         return true;
     };

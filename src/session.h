@@ -1,6 +1,6 @@
 // session.h - Receive, transmit and duplex sessions. Each returns on Esc or when done.
-#ifndef HAMPROOF_SESSION_H
-#define HAMPROOF_SESSION_H
+#ifndef RTC_SESSION_H
+#define RTC_SESSION_H
 
 #include <functional>
 #include <string>
@@ -36,7 +36,8 @@ struct PacketSession {
     std::string workingDir;                  // Where direwolf and its config are
     int kissPort = 0;
     std::string callsign;
-    int baud = 1200;                         // For estimating airtime
+    std::string destination = "CQ";          // Who typed packets are addressed to
+    int baud = 1200;                        // For estimating airtime
     int fx25 = 0;                            // Settings::fx25: packet size and airtime
     bool showReceived = true;                // Receive and Duplex
     bool canType = false;                    // Transmit and Duplex
@@ -48,4 +49,4 @@ struct PacketSession {
 // transmitted is set if anything was sent. false if direwolf failed
 bool runPacketSession(const PacketSession& session, bool& transmitted);
 
-#endif //HAMPROOF_SESSION_H
+#endif //RTC_SESSION_H

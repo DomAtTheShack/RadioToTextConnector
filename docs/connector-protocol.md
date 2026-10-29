@@ -1,17 +1,20 @@
 # Radio Connector protocol
 
-Status: **built** (`RadioConnector`, `connector.cpp`, `connector_config.cpp`). Decisions are
-listed at the end.
+Status: **built** (`RadioConnector`: `src/Connector/radio_connector.cpp`, `connector.cpp`,
+`connector_config.cpp`). Decisions are listed at the end. See also
+[ack-guide.md](ack-guide.md) (how the acks work, with the code) and
+[rc1-test-messages.md](rc1-test-messages.md) (test messages to type in RadioConnectorCli).
+`RadioTests` checks all of this automatically, over the sound cards too.
 
 The Radio Connector is a headless program that connects one radio (through direwolf,
 AX.25 only) to the suite's main program. The main program sends it text and config as
 JSON, and the connector delivers the text to another station's connector over the air.
-The interactive program stays as it is, for editing settings by hand and debugging
-packets.
+RadioConnectorCli, the menu program, stays as it is, for editing settings by hand and
+debugging packets.
 
 ```
- main program ──JSON/TCP── connector ──RF (AX.25)── connector ──JSON/TCP── main program
-   (station A)                (A)                      (B)                   (station B)
+ main program ──JSON/TCP── connector ──RF (AX.25)── connector ──JSON/TCP── client program
+   (Repeater)                (A)                      (B)                   (User A)
 ```
 
 There are two layers:
@@ -228,18 +231,20 @@ Changing `callsign`, `packetBaud`, `fx25`, the audio devices or `ptt` restarts d
 The reply says so with `restartRequired: true`, and messages in flight are kept.
 `ptt.type` can be `vox`, `cat` or `rigctld`.
 
-The cache is the same `settings.ini` the interactive program uses, so menu edits are
-what the connector starts with until the main program sends config. The connector
-always uses direwolf, whatever the file's `modem` line says. New keys (path, retry,
-hold time, main address) are added to the file; the interactive program ignores them.
+The cache is the connector's own `connector.ini`, next to RadioConnectorCli's
+`settings.ini` (or the file given with `--settings`). The first run copies `settings.ini`,
+so menu settings (sound cards, PTT, baud) carry over, and takes the next SSID as its
+callsign, so the two programs are different stations. The connector always uses direwolf,
+whatever the file's `modem` line says. Connector-only keys (path, retry, hold time, main
+address) are in the same format; RadioConnectorCli ignores them.
 
 ---
 
 ## Decisions
 
-- The receiver acks parts straight away, then sends a second result frame
-  (delivered, or expired after 3 minutes).
-- The config cache is the shared `settings.ini`.
+- The receiver acks 2 s after the last part it hears (straight away once it has every
+  part), then sends a second result frame (delivered, or expired after 3 minutes).
+- The config cache is the connector's own `connector.ini`, first copied from `settings.ini`.
 - Parts are split at the byte limit.
 - At most 40 parts per message.
 - FX.25 is on (Auto) by default and goes to every station: a plain AX.25 station still
@@ -247,4 +252,4 @@ hold time, main address) are added to the file; the interactive program ignores 
 - A partial message is dropped after 2 min with no new part, not 2 min after the first.
 - One message on the air at a time.
 - A lost result frame: poke with the last part, then `failed`.
-- JSON: nlohmann/json 3.11.3, copied into `third_party/nlohmann`.
+- JSON: nlohmann/json 3.11.3, copied into `src/third_party/nlohmann`.

@@ -19,14 +19,14 @@ Building Radio to Text Connector (CMakeLists.txt)
     ninja-build          Build tool CLion uses by default
     gdb                  Debugger for CLion
     libasound2-dev       ALSA headers + library (alsa/asoundlib.h, find_package(ALSA))
-    libusb-1.0-0-dev     Only for -DHAMPROOF_STATIC=ON: what a static Hamlib links
+    libusb-1.0-0-dev     Only for -DRTC_STATIC=ON: what a static Hamlib links
     libudev-dev          against (libusb, and libudev, which libusb uses)
 
 Building minimodem (minimodem/install-dependencies-linux.sh)
     pkg-config           Lets ./configure find the libraries below
     autoconf, automake   Generate ./configure (autoreconf -i)
     libfftw3-dev         FFT library minimodem decodes with (required)
-    libsndfile1-dev      Reading .wav files (RadioToTextConnector file.wav)
+    libsndfile1-dev      Reading .wav files (RadioConnectorCli file.wav)
     libasound2-dev       ALSA input (--alsa=...)
     libpulse-dev         PulseAudio input (minimodem's default under WSLg)
     libsndio-dev         sndio input (optional, script installs it)

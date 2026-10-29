@@ -1,6 +1,5 @@
 cmake_minimum_required(VERSION 4.1)
-# Radio to Text Connector. HAMPROOF_* options and the hamproof_* targets keep the
-# project's old internal name
+# Radio to Text Connector. RTC_* options and the rtc_core library are short for its name
 project(RadioToTextConnector)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -15,69 +14,44 @@ if(WIN32)
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
-# -DHAMPROOF_STATIC=ON links the C++ runtime (and Hamlib on Linux) into the exe.
+# -DRTC_STATIC=ON links the C++ runtime (and Hamlib on Linux) into the exe.
 # Windows (MinGW) builds always link the runtime statically
-option(HAMPROOF_STATIC "Link libraries statically where possible" OFF)
+option(RTC_STATIC "Link libraries statically where possible" OFF)
+option(RTC_TESTS "Build RadioTests and register it with ctest" ON)
 
-option(HAMPROOF_TESTS "Build the test program and register it with ctest" ON)
+# ---- Shared code ----------------------------------------------------------------------
 
-# Everything except the menus and the radio, shared by the program and the tests
-add_library(hamproof_core STATIC
-        backend.cpp backend.h
-        settings.cpp settings.h
-        modem.cpp modem.h
-        packet.cpp packet.h
-        fsk.cpp fsk.h
-        testcases.cpp testcases.h
-        connector.cpp connector.h
-        connector_config.cpp connector_config.h)
+# Everything except the menus and the radio, shared by the programs and the tests
+add_library(rtc_core STATIC
+        src/backend.cpp src/backend.h
+        src/settings.cpp src/settings.h
+        src/testcases.cpp src/testcases.h
+        "src/Radio/modem.cpp" "src/Radio/modem.h"
+        "src/Radio/fsk.cpp" "src/Radio/fsk.h"
+        src/Connector/packet.cpp src/Connector/packet.h
+        src/Connector/connector.cpp src/Connector/connector.h
+        src/Connector/connector_config.cpp src/Connector/connector_config.h)
 # third_party: nlohmann/json, copied in so builds don't need internet access
-target_include_directories(hamproof_core PUBLIC ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/third_party)
-# Lets the Test tools menu find tests/audio when run from the build folder
-target_compile_definitions(hamproof_core PRIVATE HAMPROOF_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_include_directories(rtc_core PUBLIC ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/third_party)
+# Lets the Test tools menu and RadioTests find tests/audio when run from the build folder
+target_compile_definitions(rtc_core PRIVATE RTC_SOURCE_DIR="${CMAKE_SOURCE_DIR}/src")
 
 # Sessions read the keyboard and minimodem's output on their own threads
 find_package(Threads REQUIRED)
-target_link_libraries(hamproof_core PUBLIC Threads::Threads)
+target_link_libraries(rtc_core PUBLIC Threads::Threads)
 
 # backend.cpp picks the OS code; each OS needs its own audio library
 if(WIN32)
     # ws2_32: sockets, for direwolf's KISS port
-    target_link_libraries(hamproof_core PUBLIC winmm ws2_32)
+    target_link_libraries(rtc_core PUBLIC winmm ws2_32)
 elseif(APPLE)
     # Homebrew's minimodem uses PulseAudio, so the device list comes from there too
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(LIBPULSE REQUIRED IMPORTED_TARGET libpulse)
-    target_link_libraries(hamproof_core PUBLIC PkgConfig::LIBPULSE)
+    target_link_libraries(rtc_core PUBLIC PkgConfig::LIBPULSE)
 else()
     find_package(ALSA REQUIRED)
-    target_link_libraries(hamproof_core PUBLIC ALSA::ALSA)
-endif()
-
-add_executable(RadioToTextConnector main.cpp ansi.hpp options.h session.cpp session.h cat.cpp cat.h)
-target_link_libraries(RadioToTextConnector PRIVATE hamproof_core)
-
-# The test audio goes next to the program, where the Test tools menu looks first
-add_custom_command(TARGET RadioToTextConnector POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/tests/audio
-                $<TARGET_FILE_DIR:RadioToTextConnector>/test-audio)
-
-# Headless: one radio to the suite's main program over JSON/TCP (docs/connector-protocol.md)
-add_executable(RadioConnector radio_connector.cpp cat.cpp cat.h)
-target_link_libraries(RadioConnector PRIVATE hamproof_core)
-
-# Small CAT check against a radio, the X6100 simulator or the dummy rig
-add_executable(cat_test cat_test.cpp cat.cpp cat.h)
-
-set(HAMPROOF_EXECUTABLES RadioToTextConnector RadioConnector cat_test)
-if(HAMPROOF_TESTS)
-    enable_testing()
-    add_executable(hamproof_tests tests/hamproof_tests.cpp)
-    target_link_libraries(hamproof_tests PRIVATE hamproof_core)
-    list(APPEND HAMPROOF_EXECUTABLES hamproof_tests)
-    add_test(NAME unit COMMAND hamproof_tests unit)
-    add_test(NAME audio COMMAND hamproof_tests audio ${CMAKE_SOURCE_DIR}/tests/audio)
-    set_tests_properties(audio PROPERTIES SKIP_RETURN_CODE 77)   # minimodem not installed
+    target_link_libraries(rtc_core PUBLIC ALSA::ALSA)
 endif()
 
 # Hamlib: the bundled Windows build, the one installed with `make install` on Linux,
@@ -89,13 +63,8 @@ if(WIN32)
             IMPORTED_IMPLIB ${HAMLIB_DIR}/lib/gcc/libhamlib.dll.a
             IMPORTED_LOCATION ${HAMLIB_DIR}/bin/libhamlib-4.dll
             INTERFACE_INCLUDE_DIRECTORIES ${HAMLIB_DIR}/include)
-    # The exe needs Hamlib's DLLs next to it to start
     file(GLOB HAMLIB_DLLS ${HAMLIB_DIR}/bin/*.dll)
-    foreach(target RadioToTextConnector RadioConnector cat_test)
-        add_custom_command(TARGET ${target} POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different ${HAMLIB_DLLS} $<TARGET_FILE_DIR:${target}>)
-    endforeach()
-elseif(HAMPROOF_STATIC)
+elseif(RTC_STATIC)
     # `make install` of Hamlib (and Homebrew's) puts libhamlib.a next to the shared library
     find_library(HAMLIB_STATIC_LIBRARY libhamlib.a REQUIRED)
     find_path(HAMLIB_INCLUDE_DIR hamlib/rig.h REQUIRED)
@@ -119,19 +88,53 @@ else()
             INTERFACE_INCLUDE_DIRECTORIES ${HAMLIB_INCLUDE_DIR})
 endif()
 
-# direwolf for Windows. The official Windows download has no Hamlib, so it couldn't key the
-# radio over CAT; this builds direwolf (plus atest and gen_packets, for audio files) from
-# source against the bundled Hamlib and puts them next to the program, which looks there
-# first. Linux and macOS use the installed direwolf, which has Hamlib already.
+# ---- Programs -----------------------------------------------------------------------
+
+set(CAT_SOURCES "src/Radio/cat.cpp" "src/Radio/cat.h")
+
+# RadioConnectorCli: the menu program
+add_executable(RadioConnectorCli src/main.cpp src/ansi.hpp src/options.h
+        src/session.cpp src/session.h ${CAT_SOURCES})
+
+# Headless: one radio to the suite's main program over JSON/TCP (docs/connector-protocol.md)
+add_executable(RadioConnector src/Connector/radio_connector.cpp ${CAT_SOURCES})
+
+set(RTC_PROGRAMS RadioConnectorCli RadioConnector)
+
+# Every test in one program: run it with no arguments (RadioTests --help for options)
+if(RTC_TESTS)
+    enable_testing()
+    add_executable(RadioTests src/tests/radio_tests.cpp ${CAT_SOURCES})
+    # The over-the-air tests run RadioConnector from the same folder
+    add_dependencies(RadioTests RadioConnector)
+    list(APPEND RTC_PROGRAMS RadioTests)
+    add_test(NAME RadioTests COMMAND RadioTests)
+endif()
+
+foreach(program ${RTC_PROGRAMS})
+    target_link_libraries(${program} PRIVATE rtc_core hamlib)
+endforeach()
+
+# The test audio goes next to the program, where the Test tools menu looks first
+add_custom_command(TARGET RadioConnectorCli POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/src/tests/audio
+                $<TARGET_FILE_DIR:RadioConnectorCli>/test-audio)
+
+# ---- direwolf for Windows -------------------------------------------------------------
+
+# The official Windows download has no Hamlib, so it couldn't key the radio over CAT; this
+# builds direwolf (plus atest and gen_packets, for audio files) from source against the
+# bundled Hamlib and puts them next to the programs, which look there first. Linux and
+# macOS use the installed direwolf, which has Hamlib already.
 if(WIN32)
-    option(HAMPROOF_DIREWOLF "Build direwolf with Hamlib and put it next to the program" ON)
+    option(RTC_DIREWOLF "Build direwolf with Hamlib and put it next to the program" ON)
     set(DIREWOLF_SOURCE_DIR ${CMAKE_SOURCE_DIR}/direwolf CACHE PATH "direwolf source to build")
 endif()
-if(WIN32 AND HAMPROOF_DIREWOLF)
+if(WIN32 AND RTC_DIREWOLF)
     if(NOT EXISTS ${DIREWOLF_SOURCE_DIR}/CMakeLists.txt)
         message(FATAL_ERROR "No direwolf source in ${DIREWOLF_SOURCE_DIR}. Clone it with\n"
                 "  git clone --branch 1.8.1 https://github.com/wb2osz/direwolf.git\n"
-                "or set -DHAMPROOF_DIREWOLF=OFF to build without it.")
+                "or set -DRTC_DIREWOLF=OFF to build without it.")
     endif()
     include(ExternalProject)
     set(DIREWOLF_BUILD_DIR ${CMAKE_BINARY_DIR}/direwolf-build)
@@ -152,38 +155,28 @@ if(WIN32 AND HAMPROOF_DIREWOLF)
             BUILD_COMMAND ${CMAKE_COMMAND} --build ${DIREWOLF_BUILD_DIR} --target direwolf atest gen_packets
             INSTALL_COMMAND ""
             BUILD_BYPRODUCTS ${DIREWOLF_OUTPUTS})
-    add_dependencies(RadioToTextConnector direwolf_windows)
-    add_dependencies(RadioConnector direwolf_windows)
-    add_custom_command(TARGET RadioToTextConnector POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DIREWOLF_OUTPUTS}
-                    $<TARGET_FILE_DIR:RadioToTextConnector>)
-    # The audio test decodes the packet files with this atest
-    if(HAMPROOF_TESTS)
-        add_dependencies(hamproof_tests direwolf_windows)
-        add_custom_command(TARGET hamproof_tests POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DIREWOLF_OUTPUTS} ${HAMLIB_DLLS}
-                        $<TARGET_FILE_DIR:hamproof_tests>)
-    endif()
 endif()
 
-target_link_libraries(RadioToTextConnector PRIVATE hamlib)
-target_link_libraries(RadioConnector PRIVATE hamlib)
-target_link_libraries(cat_test PRIVATE hamlib)
+# ---- Linking and the files each program needs next to it ----------------------------
 
-if(MINGW)
-    # Always link the MinGW runtime into the exe, so an older libwinpthread on PATH
-    # (e.g. WSJT-X's) can't be loaded instead. Hamlib's DLLs are still copied next to it
-    foreach(target ${HAMPROOF_EXECUTABLES})
-        target_link_options(${target} PRIVATE -static)
-    endforeach()
-elseif(HAMPROOF_STATIC)
-    foreach(target ${HAMPROOF_EXECUTABLES})
-        if(APPLE)
-            # libc++ is part of macOS and can't be linked statically; only Hamlib is
-        else()
-            # glibc and ALSA stay shared: a fully static glibc binary breaks
-            # ALSA's plugin loading and name lookups
-            target_link_options(${target} PRIVATE -static-libgcc -static-libstdc++)
+foreach(program ${RTC_PROGRAMS})
+    if(WIN32)
+        # The exe needs Hamlib's DLLs next to it to start, and direwolf for packets
+        set(NEXT_TO_PROGRAM ${HAMLIB_DLLS})
+        if(RTC_DIREWOLF)
+            add_dependencies(${program} direwolf_windows)
+            list(APPEND NEXT_TO_PROGRAM ${DIREWOLF_OUTPUTS})
         endif()
-    endforeach()
-endif()
+        add_custom_command(TARGET ${program} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different ${NEXT_TO_PROGRAM} $<TARGET_FILE_DIR:${program}>)
+    endif()
+    if(MINGW)
+        # Always link the MinGW runtime into the exe, so an older libwinpthread on PATH
+        # (e.g. WSJT-X's) can't be loaded instead. Hamlib's DLLs are still copied next to it
+        target_link_options(${program} PRIVATE -static)
+    elseif(RTC_STATIC AND NOT APPLE)
+        # glibc and ALSA stay shared: a fully static glibc binary breaks ALSA's plugin
+        # loading and name lookups. On macOS libc++ is part of the system; only Hamlib is static
+        target_link_options(${program} PRIVATE -static-libgcc -static-libstdc++)
+    endif()
+endforeach()

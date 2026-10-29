@@ -1,6 +1,6 @@
 // packet.h - AX.25 UI frames, KISS framing, and atest/gen_packets formats.
-#ifndef HAMPROOF_PACKET_H
-#define HAMPROOF_PACKET_H
+#ifndef RTC_PACKET_H
+#define RTC_PACKET_H
 
 #include <cstdint>
 #include <optional>
@@ -70,4 +70,4 @@ double airtime(size_t frameBytes, int baud, int fx25 = 0);
 
 } // namespace packet
 
-#endif //HAMPROOF_PACKET_H
+#endif //RTC_PACKET_H

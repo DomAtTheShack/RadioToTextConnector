@@ -1,12 +1,12 @@
 // testcases.h - The tests/audio test cases, used by ctest and the Test tools menu.
-#ifndef HAMPROOF_TESTCASES_H
-#define HAMPROOF_TESTCASES_H
+#ifndef RTC_TESTCASES_H
+#define RTC_TESTCASES_H
 
 #include <string>
 #include <vector>
 
-#include "fsk.h"
-#include "packet.h"
+#include "Radio/fsk.h"
+#include "Connector/packet.h"
 #include "settings.h"
 
 inline const std::string testCallsign = "N0CALL-1";
@@ -68,4 +68,4 @@ bool writeTestAudio(const std::string& dir, std::string& error);
 // test-audio next to the program, else tests/audio. "" if neither
 std::string findTestAudioDir();
 
-#endif //HAMPROOF_TESTCASES_H
+#endif //RTC_TESTCASES_H

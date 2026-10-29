@@ -112,6 +112,7 @@ std::string formatSettings(const Settings& s) {
     out << "retry_extra_wait=" << s.retryExtraWait << "\n";
     out << "hold_for_main=" << s.holdForMain << "\n";
     out << "main=" << s.mainAddress << "\n";
+    out << "send_to=" << s.sendTo << "\n";
     return out.str();
 }
 
@@ -177,6 +178,7 @@ Settings parseSettings(const std::string& text) {
         else if (key == "retry_extra_wait") toInt(value, 0, 600, s.retryExtraWait);
         else if (key == "hold_for_main")    toInt(value, 0, 86400, s.holdForMain);
         else if (key == "main")             s.mainAddress = value;
+        else if (key == "send_to")          s.sendTo = value;
     }
     return s;
 }
@@ -185,20 +187,34 @@ std::string settingsPath() {
     return (configDir() / "settings.ini").string();
 }
 
+std::string connectorSettingsPath() {
+    return (configDir() / "connector.ini").string();
+}
+
 Settings loadSettings() {
-    std::ifstream in(configDir() / "settings.ini");
+    return loadSettingsFrom(settingsPath());
+}
+
+bool saveSettings(const Settings& settings) {
+    return saveSettingsTo(settings, settingsPath());
+}
+
+Settings loadSettingsFrom(const std::string& path, bool* found) {
+    std::ifstream in{fs::path(path)};
+    if (found) *found = static_cast<bool>(in);
     if (!in) return Settings{};
     std::stringstream text;
     text << in.rdbuf();
     return parseSettings(text.str());
 }
 
-bool saveSettings(const Settings& settings) {
+bool saveSettingsTo(const Settings& settings, const std::string& pathText) {
     std::error_code ec;
-    fs::create_directories(configDir(), ec);
+    fs::path path = fs::path(pathText);
+    if (path.has_parent_path()) fs::create_directories(path.parent_path(), ec);
     // Write to a temp file and rename, so a crash can't leave a half-written file
-    fs::path path = configDir() / "settings.ini";
-    fs::path temp = configDir() / "settings.ini.tmp";
+    fs::path temp = path;
+    temp += ".tmp";
     {
         std::ofstream out(temp, std::ios::trunc);
         if (!out) return false;

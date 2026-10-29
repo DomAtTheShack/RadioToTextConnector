@@ -166,7 +166,7 @@ void Process::closePipe() {
 }
 
 bool Process::start(const std::vector<std::string>& argv, bool captureStdout, bool pipeStdin,
-                    const std::string& workingDir) {
+                    const std::string& workingDir, bool mergeStderr) {
     if (argv.empty()) {
         lastError = "start: no program given";
         return false;
@@ -204,7 +204,7 @@ bool Process::start(const std::vector<std::string>& argv, bool captureStdout, bo
         si.dwFlags    = STARTF_USESTDHANDLES;
         si.hStdInput  = pipeStdin     ? inRead   : GetStdHandle(STD_INPUT_HANDLE);
         si.hStdOutput = captureStdout ? outWrite : GetStdHandle(STD_OUTPUT_HANDLE);
-        si.hStdError  = GetStdHandle(STD_ERROR_HANDLE);
+        si.hStdError  = captureStdout && mergeStderr ? outWrite : GetStdHandle(STD_ERROR_HANDLE);
     }
 
     PROCESS_INFORMATION pi{};
@@ -358,6 +358,61 @@ void TcpConnection::shutdown() {
 }
 
 void TcpConnection::close() {
+    if (sock != -1) {
+        closesocket(static_cast<SOCKET>(sock));
+        sock = -1;
+    }
+}
+
+TcpListener::~TcpListener() { close(); }
+
+bool TcpListener::listen(int port) {
+    close();
+    if (!winsockReady()) {
+        lastError = "Winsock could not start";
+        return false;
+    }
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) {
+        lastError = socketError("socket");
+        return false;
+    }
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<u_short>(port));
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    if (bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof addr) == SOCKET_ERROR ||
+        ::listen(s, 1) == SOCKET_ERROR) {
+        lastError = socketError(("listen on port " + std::to_string(port)).c_str());
+        closesocket(s);
+        return false;
+    }
+    sock = static_cast<long long>(s);
+    return true;
+}
+
+bool TcpListener::accept(TcpConnection& connection, int timeoutMs) {
+    if (sock == -1) return false;
+    fd_set waiting;
+    FD_ZERO(&waiting);
+    FD_SET(static_cast<SOCKET>(sock), &waiting);
+    timeval wait{timeoutMs / 1000, (timeoutMs % 1000) * 1000};
+    int ready = select(0, &waiting, nullptr, nullptr, &wait);
+    if (ready <= 0) {
+        lastError = ready == 0 ? "nothing connected in time" : socketError("select");
+        return false;
+    }
+    SOCKET s = ::accept(static_cast<SOCKET>(sock), nullptr, nullptr);
+    if (s == INVALID_SOCKET) {
+        lastError = socketError("accept");
+        return false;
+    }
+    connection.close();
+    connection.sock = static_cast<long long>(s);
+    return true;
+}
+
+void TcpListener::close() {
     if (sock != -1) {
         closesocket(static_cast<SOCKET>(sock));
         sock = -1;
@@ -602,11 +657,11 @@ std::string startPulse(const std::string& playback, const std::string& capture) 
         L"-L", L"module-native-protocol-tcp listen=127.0.0.1 auth-anonymous=1 port=" + std::to_wstring(port)};
     if (!playback.empty()) {
         args.push_back(L"-L");
-        args.push_back(L"module-waveout sink_name=hamproof_tx record=0 output_device=" + widen(playback));
+        args.push_back(L"module-waveout sink_name=rtc_tx record=0 output_device=" + widen(playback));
     }
     if (!capture.empty()) {
         args.push_back(L"-L");
-        args.push_back(L"module-waveout source_name=hamproof_rx playback=0 input_device=" + widen(capture));
+        args.push_back(L"module-waveout source_name=rtc_rx playback=0 input_device=" + widen(capture));
     }
     std::wstring cmdLine;
     for (const std::wstring& arg : args) {
@@ -652,8 +707,8 @@ std::string startPulse(const std::string& playback, const std::string& capture) 
             pulse.playback = playback;
             pulse.capture = capture;
             SetEnvironmentVariableW(L"PULSE_SERVER", (L"tcp:127.0.0.1:" + std::to_wstring(port)).c_str());
-            SetEnvironmentVariableW(L"PULSE_SINK", playback.empty() ? nullptr : L"hamproof_tx");
-            SetEnvironmentVariableW(L"PULSE_SOURCE", capture.empty() ? nullptr : L"hamproof_rx");
+            SetEnvironmentVariableW(L"PULSE_SINK", playback.empty() ? nullptr : L"rtc_tx");
+            SetEnvironmentVariableW(L"PULSE_SOURCE", capture.empty() ? nullptr : L"rtc_rx");
             return "";
         }
     }
@@ -797,7 +852,7 @@ void Process::closePipe() {
 }
 
 bool Process::start(const std::vector<std::string>& argv, bool captureStdout, bool pipeStdin,
-                    const std::string& workingDir) {
+                    const std::string& workingDir, bool mergeStderr) {
     if (argv.empty()) {
         lastError = "start: no program given";
         return false;
@@ -849,6 +904,7 @@ bool Process::start(const std::vector<std::string>& argv, bool captureStdout, bo
         if (captureStdout) {
             close(outPipe[0]);
             dup2(outPipe[1], STDOUT_FILENO);
+            if (mergeStderr) dup2(outPipe[1], STDERR_FILENO);
             close(outPipe[1]);
         }
         if (pipeStdin) {
@@ -1013,6 +1069,62 @@ void TcpConnection::shutdown() {
 }
 
 void TcpConnection::close() {
+    if (sock != -1) {
+        ::close(static_cast<int>(sock));
+        sock = -1;
+    }
+}
+
+TcpListener::~TcpListener() { close(); }
+
+bool TcpListener::listen(int port) {
+    close();
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s == -1) {
+        lastError = errnoMessage("socket", errno);
+        return false;
+    }
+    fcntl(s, F_SETFD, FD_CLOEXEC);
+    int reuse = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof reuse);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    if (bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof addr) == -1 || ::listen(s, 1) == -1) {
+        lastError = errnoMessage("listen on port " + std::to_string(port), errno);
+        ::close(s);
+        return false;
+    }
+    sock = s;
+    return true;
+}
+
+bool TcpListener::accept(TcpConnection& connection, int timeoutMs) {
+    if (sock == -1) return false;
+    pollfd waiting{static_cast<int>(sock), POLLIN, 0};
+    int ready;
+    do { ready = poll(&waiting, 1, timeoutMs); } while (ready == -1 && errno == EINTR);
+    if (ready <= 0) {
+        lastError = ready == 0 ? "nothing connected in time" : errnoMessage("poll", errno);
+        return false;
+    }
+    int s = ::accept(static_cast<int>(sock), nullptr, nullptr);
+    if (s == -1) {
+        lastError = errnoMessage("accept", errno);
+        return false;
+    }
+    fcntl(s, F_SETFD, FD_CLOEXEC);
+#ifdef SO_NOSIGPIPE
+    int noSigpipe = 1;
+    setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &noSigpipe, sizeof noSigpipe);
+#endif
+    connection.close();
+    connection.sock = s;
+    return true;
+}
+
+void TcpListener::close() {
     if (sock != -1) {
         ::close(static_cast<int>(sock));
         sock = -1;

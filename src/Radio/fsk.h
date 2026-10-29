@@ -1,7 +1,7 @@
 // fsk.h - Test audio (RTTY, Bell202, AX.25, tones, noise), made without minimodem or
 // direwolf so decoding it checks we match them.
-#ifndef HAMPROOF_FSK_H
-#define HAMPROOF_FSK_H
+#ifndef RTC_FSK_H
+#define RTC_FSK_H
 
 #include <cstdint>
 #include <string>
@@ -34,4 +34,4 @@ bool writeWav(const std::string& path, const Audio& audio);
 
 } // namespace fsk
 
-#endif //HAMPROOF_FSK_H
+#endif //RTC_FSK_H

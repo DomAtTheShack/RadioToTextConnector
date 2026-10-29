@@ -1,11 +1,11 @@
 // modem.h - minimodem and direwolf command lines and config.
-#ifndef HAMPROOF_MODEM_H
-#define HAMPROOF_MODEM_H
+#ifndef RTC_MODEM_H
+#define RTC_MODEM_H
 
 #include <string>
 #include <vector>
 
-#include "settings.h"
+#include "../settings.h"
 
 // Shift should be at least the baud rate; twice that is comfortable
 enum class ShiftFit { TooNarrow, Marginal, Comfortable };
@@ -34,4 +34,4 @@ std::vector<std::string> genPacketsArgs(const Settings& settings, const std::str
 // One-line summary, e.g. "Receive | RTTY 45.45 baud | mark 2125 / space 2295 Hz | squelch 3.5"
 std::string describe(const Settings& settings);
 
-#endif //HAMPROOF_MODEM_H
+#endif //RTC_MODEM_H

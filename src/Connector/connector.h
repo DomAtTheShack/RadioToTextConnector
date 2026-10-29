@@ -1,8 +1,8 @@
 // connector.h - The Radio Connector's message protocol (docs/connector-protocol.md).
 // No I/O here: the program passes in frames heard, requests from the main program and
 // the time, and the engine answers through two callbacks. That keeps it testable.
-#ifndef HAMPROOF_CONNECTOR_H
-#define HAMPROOF_CONNECTOR_H
+#ifndef RTC_CONNECTOR_H
+#define RTC_CONNECTOR_H
 
 #include <chrono>
 #include <functional>
@@ -168,4 +168,4 @@ private:
 
 } // namespace connector
 
-#endif //HAMPROOF_CONNECTOR_H
+#endif //RTC_CONNECTOR_H

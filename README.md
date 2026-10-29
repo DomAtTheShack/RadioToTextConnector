@@ -1,17 +1,25 @@
 ## Radio to Text Connector
 
-Send and receive text over ham radio from a terminal.
+Send and receive text over ham radio.
 
 - **minimodem**: RTTY (Baudot) or Bell202, a continuous character stream.
-- **direwolf**: AX.25 packets at 300, 1200 or 9600 baud. One packet per line, with your
-  callsign and error checking.
+- **direwolf**: AX.25 packets at 300, 1200 or 9600 baud, with FX.25 error correction. One
+  packet per line, with your callsign and error checking.
 
 PTT is CAT (Hamlib) or VOX. Common Icom, Yaesu, Kenwood, Elecraft and Xiegu radios are
 listed; any other Hamlib model works by number, or through `rigctld`.
 
-### Using it
+### The programs
 
-Run `RadioToTextConnector`:
+| Program | What it is |
+| --- | --- |
+| `RadioConnectorCli` | The menu program: pick settings, then send and receive text by hand. Also the tool for testing a connector over the air |
+| `RadioConnector` | Headless: connects one radio to the suite's main program, with acks and retries ([below](#radioconnector)) |
+| `RadioTests` | Every test, run with no arguments ([below](#tests)) |
+
+### RadioConnectorCli
+
+Run `RadioConnectorCli`:
 
 - **Start** runs with the current settings.
 - **Settings** changes them. They're saved to:
@@ -23,7 +31,7 @@ Run `RadioToTextConnector`:
 Menu keys: Up/Down (j/k), PgUp/PgDn, Home/End, Enter to choose, Esc/q to go back, or type
 an item's number.
 
-`RadioToTextConnector [-q] [file.wav]`: `file.wav` is decoded (Receive) or written
+`RadioConnectorCli [-q] [file.wav]`: `file.wav` is decoded (Receive) or written
 (Transmit); `-q` hides carrier lines.
 
 #### minimodem
@@ -35,54 +43,114 @@ an item's number.
 
 #### direwolf
 
-Set **Modem** to direwolf, then **Packet speed** and **Callsign**. Packets go to `CQ`.
+Set **Modem** to direwolf, then **Packet speed** and **Callsign**.
 
 - **Receive**: shows packets as they arrive.
 - **Transmit**: Enter sends a packet, Tab finishes.
 - **Duplex**: send and receive at once, chat style.
 
+**Send to** (Transmit and Duplex) picks who typed packets are addressed to: empty for `CQ`
+(everyone), or a station's callsign, e.g. a RadioConnector's `N0CALL-1` when testing it.
+Packets addressed to someone other than `CQ` show as `FROM>TO:`.
+
 Esc waits for queued packets, then stops; Esc again stops now. direwolf always needs the
 Rx sound card. With an audio file, `atest` decodes and `gen_packets` writes.
 
 **FX.25** (Transmit and Duplex, Auto unless changed) adds Reed-Solomon error correction,
-so packets survive some bad bytes. Stations without FX.25 still decode them as plain AX.25. Receiving
-always decodes FX.25. Packets are shorter with it on (179 bytes of text, or 139 with 64
-check bytes), so long lines take more packets.
+so packets survive some bad bytes. Stations without FX.25 still decode them as plain AX.25.
+Receiving always decodes FX.25. Packets are shorter with it on (179 bytes of text, or 139
+with 64 check bytes), so long lines take more packets.
 
-### Radio Connector
+### RadioConnector
 
 `RadioConnector --main 127.0.0.1:9000` runs headless: it connects one radio (direwolf,
 AX.25 with FX.25) to the suite's main program, which sends it text and config as JSON
 lines over TCP. The connector delivers the text to another station's connector, splitting
-it into parts, with acks and retries, and reports each message's state. The protocol is
-in [docs/connector-protocol.md](docs/connector-protocol.md).
+it into parts, with acks and retries, and reports each message's state. The main program
+never deals with the radio: every connector speaks the same JSON, whatever it connects to.
 
-- It dials the main program and retries every 5 s; the radio keeps running meanwhile.
-- Config comes from the main program and is kept in the same `settings.ini`, so it starts
-  with the last one. It needs a callsign and both sound cards before direwolf starts.
-- `--verbose` logs every frame, JSON line and direwolf's output. Logs go to stderr.
+- It dials the main program and retries every 5 s; the radio keeps running meanwhile. Pick a
+  port nothing else uses (8080 is often a web server's).
+- It keeps its own settings in `connector.ini`, next to `settings.ini`, so it is a different
+  station from RadioConnectorCli. The first run copies `settings.ini` and takes the next SSID
+  as its callsign (N0CALL becomes N0CALL-1). Edit the file by hand, or let the main program
+  send config.
+- It needs a callsign and both sound cards before direwolf starts.
+
+| Option | |
+| --- | --- |
+| `--main host:port` | Where the main program listens (saved in `connector.ini`) |
+| `--settings file` | Use this settings file instead of `connector.ini` |
+| `--verbose` | Log every frame sent (`tx`) and heard (`rx`), and every JSON line (`to main`, `from main`) |
+| `--direwolf` | Also show direwolf's own output, as `direwolf:` lines |
+| `--quit-on-disconnect` | Exit when the main program hangs up (RadioTests uses it) |
+
+Logs go to stderr.
+
+### Docs
+
+- [docs/connector-protocol.md](docs/connector-protocol.md): the protocol. JSON between the
+  main program and a connector, and the `RC1` air format between connectors.
+- [docs/ack-guide.md](docs/ack-guide.md): how the acks work, when each is sent, and the code
+  that does it.
+- [docs/rc1-test-messages.md](docs/rc1-test-messages.md): `RC1` lines to type in
+  RadioConnectorCli to test a RadioConnector's acks by hand.
 
 ### Installing the modems
 
 - **Windows**: the build compiles direwolf with Hamlib (the official build has no CAT
   PTT). Put the source in `direwolf/`
   (`git clone --branch 1.8.1 https://github.com/wb2osz/direwolf.git`), or build with
-  `-DHAMPROOF_DIREWOLF=OFF`. minimodem is the Cygwin build; install Cygwin's
-  `pulseaudio` package too, which the program runs on the sound cards you pick. Allow direwolf through Windows Firewall if asked.
-- **Linux**: `sudo apt install minimodem direwolf` (see `APT-PACKAGES.txt`).
+  `-DRTC_DIREWOLF=OFF`. minimodem is the Cygwin build; install Cygwin's `pulseaudio`
+  package too, which the program runs on the sound cards you pick. Allow direwolf through
+  Windows Firewall if asked.
+- **Linux**: `sudo apt install minimodem direwolf` (see `src/APT-PACKAGES.txt`).
 - **macOS**: `brew install hamlib minimodem direwolf && brew services start pulseaudio`.
   direwolf uses the default sound devices.
 
-The program looks on the PATH, in `/usr/local/bin`, `/opt/homebrew/bin` and next to
-itself.
+The programs look on the PATH, in `/usr/local/bin`, `/opt/homebrew/bin` and next to
+themselves.
+
+### Building
+
+CMake 4.1 or newer and a C++20 compiler (MinGW on Windows).
+
+```
+cmake -S . -B build
+cmake --build build
+```
+
+- Windows: Hamlib's Windows build goes in `hamlib-w64-4.7.2/` and direwolf's source in
+  `direwolf/`. The programs, direwolf and Hamlib's DLLs end up together in `build/bin`.
+- Linux and macOS: Hamlib installed (`make install`, or Homebrew). `src/APT-PACKAGES.txt`
+  lists the Ubuntu packages.
+- Options: `-DRTC_STATIC=ON` links libraries statically where possible,
+  `-DRTC_TESTS=OFF` skips RadioTests, `-DRTC_DIREWOLF=OFF` (Windows) skips building direwolf.
+
+Source layout:
+
+| Folder | What's in it |
+| --- | --- |
+| `src/` | RadioConnectorCli (`main.cpp`, `session.cpp`), settings, the OS layer (`backend.cpp`), test cases |
+| `src/Radio/` | The modems (minimodem and direwolf command lines and configs, Baudot audio) and CAT radio control |
+| `src/Connector/` | RadioConnector (`radio_connector.cpp`), its ack engine (`connector.cpp`), config, and AX.25/KISS (`packet.cpp`) |
+| `src/tests/` | RadioTests (`radio_tests.cpp`) and the test audio |
+| `docs/` | The protocol and testing docs |
 
 ### Tests
 
-`tests/audio` holds RTTY, Bell202 and packet recordings plus calibration tones (see its
-README). `ctest` runs:
+`RadioTests` runs every test with no arguments (`ctest` runs it too). A group that can't
+run on this computer is skipped, not failed:
 
-- `unit`: settings, command lines, Baudot, AX.25/KISS, scoring
-- `audio`: decodes each test file and checks the text. Skipped if the decoder isn't
-  installed
+- `unit`: settings, command lines, Baudot, AX.25/KISS, FX.25, scoring, the connector's
+  protocol and ack logic
+- `audio`: decodes each file in `src/tests/audio` (RTTY, Bell202, packet recordings and
+  calibration tones; see its README) and checks the text. Skipped without minimodem or atest
+- `cat`: frequency, mode and PTT through Hamlib's dummy rig. `--cat-port COM5` tests a
+  real radio instead (it is keyed for half a second)
+- `air`: starts RadioConnector and a stand-in station on the sound cards from
+  `settings.ini` (e.g. VB-Cable looped back), then checks receiving, a missing part, and
+  sending with acks. Skipped without sound cards, or when PTT is a radio over CAT
 
-To regenerate the files: `hamproof_tests generate ../tests/audio` from the build folder.
+`--only unit,cat` or `--skip air` picks groups; `RadioTests --help` lists every option.
+To regenerate the test audio: `RadioTests --generate ../src/tests/audio` from the build folder.

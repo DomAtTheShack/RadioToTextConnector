@@ -1,13 +1,13 @@
 // connector_config.h - The Radio Connector's config as JSON, kept in settings.ini.
-#ifndef HAMPROOF_CONNECTOR_CONFIG_H
-#define HAMPROOF_CONNECTOR_CONFIG_H
+#ifndef RTC_CONNECTOR_CONFIG_H
+#define RTC_CONNECTOR_CONFIG_H
 
 #include <string>
 
 #include <nlohmann/json.hpp>
 
 #include "connector.h"
-#include "settings.h"
+#include "../settings.h"
 
 namespace connector {
 
@@ -34,4 +34,4 @@ Options engineOptions(const Settings& settings);
 
 } // namespace connector
 
-#endif //HAMPROOF_CONNECTOR_CONFIG_H
+#endif //RTC_CONNECTOR_CONFIG_H

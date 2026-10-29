@@ -1,6 +1,6 @@
 // settings.h - Settings and their file.
-#ifndef HAMPROOF_SETTINGS_H
-#define HAMPROOF_SETTINGS_H
+#ifndef RTC_SETTINGS_H
+#define RTC_SETTINGS_H
 
 #include <string>
 #include <vector>
@@ -34,12 +34,15 @@ struct Settings {
     std::string audioFile;     // Empty = sound card
     bool quiet = false;        // minimodem -q
 
-    // Radio Connector only; the interactive program keeps them but doesn't use them
+    // Radio Connector only; RadioConnectorCli keeps them but doesn't use them
     std::vector<std::string> path;   // Digipeaters, e.g. WIDE1-1
     int retryTries = 4;              // Sends of a message before it fails
     int retryExtraWait = 10;         // Seconds to wait for an ack, on top of the airtime
     int holdForMain = 180;           // Seconds a received message waits for the main program
     std::string mainAddress;         // host:port of the main program
+
+    // Interactive program only: who typed packets go to. Empty = CQ
+    std::string sendTo;
 
     // Mark is the lower tone
     float markHz()  const { return centre - shift / 2.0f; }
@@ -61,10 +64,17 @@ std::string settingsPath();
 Settings loadSettings();
 bool saveSettings(const Settings& settings);
 
+// The Radio Connector keeps its own file, connector.ini, in the same folder, so it can
+// run as a different station from RadioConnectorCli
+std::string connectorSettingsPath();
+// found is set to whether the file was there; a missing file gives the defaults
+Settings loadSettingsFrom(const std::string& path, bool* found = nullptr);
+bool saveSettingsTo(const Settings& settings, const std::string& path);
+
 const char* operationName(Operation operation);
 const char* engineName(Engine engine);
 const char* protocolName(Protocol protocol);
 // "Off", "Auto", "16 check bytes", ...
 std::string fx25Name(int fx25);
 
-#endif //HAMPROOF_SETTINGS_H
+#endif //RTC_SETTINGS_H

@@ -1,25 +1,42 @@
-// hamproof_tests.cpp - Run by ctest:
-//   hamproof_tests unit              No minimodem or direwolf needed
-//   hamproof_tests audio <dir>       Decodes the test files. Exits 77 (skipped) if no decoder
-//   hamproof_tests generate <dir>    Rewrites the test files
-// On GitHub Actions, results also go to annotations and the job summary.
+// radio_tests.cpp - RadioTests: every test, with no arguments needed (run by ctest too).
+//   unit   The code on its own: settings, modems' command lines, AX.25, FX.25, the connector
+//   audio  Decodes tests/audio with minimodem and direwolf's atest (skipped without them)
+//   cat    Radio control through Hamlib's dummy rig, or a real radio with --cat-port
+//   air    RadioConnector and a stand-in station over the sound cards (e.g. VB-Cable):
+//          receiving, a missing part, and sending with acks. Skipped without sound cards
+// RadioTests --help lists the options. On GitHub Actions, results also go to annotations
+// and the job summary.
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <filesystem>
+#include <fstream>
+#include <map>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <optional>
+#include <random>
+#include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
-#include "connector.h"
-#include "connector_config.h"
-#include "fsk.h"
-#include "modem.h"
-#include "packet.h"
-#include "settings.h"
-#include "testcases.h"
+#include "../backend.h"
+#include "../Connector/connector.h"
+#include "../Connector/connector_config.h"
+#include "../Radio/cat.h"
+#include "../Radio/fsk.h"
+#include "../Radio/modem.h"
+#include "../Connector/packet.h"
+#include "../settings.h"
+#include "../testcases.h"
 
 using std::string;
 
@@ -96,8 +113,8 @@ void check(bool ok, const char* what, int line) {
     checks++;
     if (ok) return;
     failures++;
-    std::printf("FAIL tests/hamproof_tests.cpp:%d: %s\n", line, what);
-    annotate("error", "tests/hamproof_tests.cpp", line, "Unit test failed", what);
+    std::printf("FAIL src/tests/radio_tests.cpp:%d: %s\n", line, what);
+    annotate("error", "src/tests/radio_tests.cpp", line, "Unit test failed", what);
     failureLines.push_back("line " + std::to_string(line) + ": `" + cell(what) + "`");
 }
 
@@ -802,7 +819,7 @@ int runUnit() {
     summary += "\n**" + std::to_string(checks - failures) + " of " + std::to_string(checks) +
                " checks passed**\n";
     if (!failureLines.empty()) {
-        summary += "\nFailed checks in `tests/hamproof_tests.cpp`:\n";
+        summary += "\nFailed checks in `src/tests/radio_tests.cpp`:\n";
         for (const string& line : failureLines) summary += "- " + line + "\n";
     }
     appendSummary(summary + "\n");
@@ -813,7 +830,7 @@ int runAudio(const std::string& dir) {
     bool haveMinimodem = minimodemAvailable(), haveAtest = atestAvailable();
     if (!haveMinimodem && !haveAtest) {
         std::printf("Neither minimodem nor atest found; skipping the audio tests\n");
-        annotate("notice", "tests/audio/README.md", 0, "Audio tests skipped",
+        annotate("notice", "src/tests/audio/README.md", 0, "Audio tests skipped",
                  "minimodem and direwolf aren't installed on this runner, so tests/audio wasn't decoded here");
         appendSummary("### Audio tests (" + runnerName() + ")\n\n⏭️ Skipped: minimodem and direwolf "
                       "aren't installed on this runner.\n\n");
@@ -850,7 +867,7 @@ int runAudio(const std::string& dir) {
         for (size_t at = indented.find('\n'); at != string::npos; at = indented.find('\n', at + 6))
             indented.replace(at, 1, "\n     ");
         std::printf("     %s\n", indented.c_str());
-        annotate("error", "tests/audio/" + c.file, 0, "Audio test failed: " + c.file,
+        annotate("error", "src/tests/audio/" + c.file, 0, "Audio test failed: " + c.file,
                  percent(result.accuracy) + " right, needs " + percent(c.minAccuracy) + "\n" + detail);
         failureDetails += "\n**`" + c.file + "`** (" + cell(describe(c.settings)) + ")\n```\n" +
                     detail + "\n```\n";
@@ -866,21 +883,627 @@ int runAudio(const std::string& dir) {
     return failed == 0 ? 0 : 1;
 }
 
+// ---- Options -------------------------------------------------------------------
+
+const std::vector<string> allGroups = {"unit", "audio", "cat", "air"};
+
+struct Options {
+    std::set<string> groups{allGroups.begin(), allGroups.end()};
+    string audioDir;                 // Empty = test-audio next to the program, else tests/audio
+    string catPort;                  // Empty = Hamlib's dummy rig
+    int catModel = 0;                // 0 = dummy rig, or the radio from settings with --cat-port
+    int catBaud = 0;                 // 0 = from settings
+    string rxAudio, txAudio;         // Empty = from settings.ini
+    string callsign;                 // Empty = from settings.ini, else N0CALL
+    int airSeconds = 60;             // Longest wait for any one step over the air
+};
+
+const int skippedCode = 77;
+
+// ---- CAT ---------------------------------------------------------------------------
+
+// Hamlib's dummy rig by default; with --cat-port, a real radio. A real radio is keyed for
+// a moment, then put back on its frequency and mode
+int runCat(const Options& options) {
+    Settings settings = loadSettings();
+    bool real = !options.catPort.empty();
+    rig_model_t model = options.catModel ? options.catModel : real ? settings.rigModel : RIG_MODEL_DUMMY;
+    int baud = options.catBaud ? options.catBaud : settings.catBaud;
+    string port = real ? options.catPort : "dummy";
+    string name = radioName(model);
+    std::printf("Radio: %s (Hamlib model %d)%s\n", name.empty() ? "?" : name.c_str(), static_cast<int>(model),
+                real ? (" on " + port).c_str() : "");
+    int failuresBefore = failures, checksBefore = checks;
+    try {
+        Cat radio(model, port, baud);
+        double startHz = radio.frequency();
+        rmode_t startMode = radio.mode();
+        const double testHz = 14080000;
+        radio.setFrequency(testHz);
+        CHECK(std::fabs(radio.frequency() - testHz) < 1);
+        radio.setMode(RIG_MODE_PKTUSB);
+        CHECK(radio.mode() == RIG_MODE_PKTUSB);
+        {
+            PttGuard keyed(radio);
+            CHECK(radio.transmitting());
+            std::this_thread::sleep_for(std::chrono::milliseconds(real ? 500 : 50));
+        }
+        CHECK(!radio.transmitting());
+        radio.setFrequency(startHz);
+        radio.setMode(startMode);
+    } catch (const std::exception& e) {
+        std::printf("FAIL %s\n", e.what());
+        annotate("error", "src/Radio/cat.cpp", 0, "CAT test failed", e.what());
+        failures++;
+        checks++;
+    }
+    int ran = checks - checksBefore, failed = failures - failuresBefore;
+    std::printf("%s  CAT: frequency, mode and PTT (%d checks)\n", failed ? "FAIL" : "PASS", ran);
+    appendSummary("### CAT test (" + runnerName() + ")\n\n" + (failed ? "❌ FAIL" : "✅ PASS") + ": " +
+                  cell(name.empty() ? "Hamlib model " + std::to_string(model) : name) +
+                  ", frequency, mode and PTT\n\n");
+    return failed ? 1 : 0;
+}
+
+// ---- Over the air ------------------------------------------------------------------
+
+using Clock = std::chrono::steady_clock;
+
+// What the test hears: JSON lines from the connector, and frames from the stand-in station
+struct Heard {
+    bool frame = false;
+    string line;
+    packet::Frame packet;
+};
+
+class Inbox {
+public:
+    void push(Heard heard) {
+        {
+            std::lock_guard lock(mutex);
+            queue.push_back(std::move(heard));
+        }
+        ready.notify_one();
+    }
+    std::optional<Heard> pop(Clock::duration wait) {
+        std::unique_lock lock(mutex);
+        if (!ready.wait_for(lock, wait, [this] { return !queue.empty(); })) return std::nullopt;
+        Heard heard = std::move(queue.front());
+        queue.pop_front();
+        return heard;
+    }
+
+private:
+    std::mutex mutex;
+    std::condition_variable ready;
+    std::deque<Heard> queue;
+};
+
+// A child process whose output is kept, to show if something fails
+class Child {
+public:
+    ~Child() { stop(); }
+    bool start(const std::vector<string>& argv, const string& dir = "") {
+        if (!process.start(argv, true, false, dir, true)) return false;
+        reader = std::thread([this] {
+            char buffer[1024];
+            long n;
+            while ((n = process.read(buffer, sizeof buffer)) > 0) {
+                std::lock_guard lock(mutex);
+                output.append(buffer, static_cast<size_t>(n));
+                if (output.size() > 20000) output.erase(0, output.size() - 20000);
+            }
+        });
+        return true;
+    }
+    // Waits up to `grace` for it to exit on its own, then kills it
+    void stop(std::chrono::seconds grace = std::chrono::seconds(0)) {
+        auto deadline = Clock::now() + grace;
+        while (process.running() && Clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (process.running()) process.kill();
+        if (reader.joinable()) reader.join();
+        process.wait();
+    }
+    string log() {
+        std::lock_guard lock(mutex);
+        return output;
+    }
+    const string& error() const { return process.error(); }
+
+private:
+    os::Process process;
+    std::thread reader;
+    std::mutex mutex;
+    string output;
+};
+
+string connectorPath() {
+#ifdef _WIN32
+    const char* name = "RadioConnector.exe";
+#else
+    const char* name = "RadioConnector";
+#endif
+    std::filesystem::path path = std::filesystem::path(os::executableDir()) / name;
+    std::error_code ec;
+    return std::filesystem::exists(path, ec) ? path.string() : "";
+}
+
+string baseCallsign(const string& callsign) {
+    string call = packet::normalizeCallsign(callsign);
+    if (call.empty()) return "N0CALL";
+    return call.substr(0, call.find('-'));
+}
+
+string indent(const string& text) {
+    string out = "     | ";
+    for (char c : text) {
+        if (c == '\r') continue;
+        out += c;
+        if (c == '\n') out += "     | ";
+    }
+    return out;
+}
+
+class AirTest {
+public:
+    explicit AirTest(const Options& options) : options(options) {}
+
+    ~AirTest() {
+        mainLink.shutdown();   // The connector quits when its main program hangs up
+        if (mainReader.joinable()) mainReader.join();
+        connector.stop(std::chrono::seconds(10));
+        peerLink.shutdown();
+        if (peerReader.joinable()) peerReader.join();
+        peer.stop();
+        std::error_code ec;
+        if (!workDir.empty()) std::filesystem::remove_all(workDir, ec);
+    }
+
+    // "" when ready to run, else why it's skipped
+    string prepare() {
+        Settings settings = loadSettings();
+        string rx = options.rxAudio.empty() ? settings.rxAudio : options.rxAudio;
+        string tx = options.txAudio.empty() ? settings.txAudio : options.txAudio;
+        bool devicesGiven = !options.rxAudio.empty() || !options.txAudio.empty();
+        if (!direwolfAvailable()) return string("direwolf not found at ") + os::direwolfPath();
+        program = connectorPath();
+        if (program.empty()) return "RadioConnector isn't next to RadioTests";
+        if (rx.empty() || tx.empty())
+            return "no sound cards set. Pick them in the menu program, or give --rx-audio and --tx-audio";
+        if (!settings.catPort.empty() && !devicesGiven)
+            return "PTT is set to a radio over CAT, so this would transmit for real. Give --rx-audio "
+                   "and --tx-audio to run it anyway";
+
+        string base = baseCallsign(options.callsign.empty() ? settings.callsign : options.callsign);
+        connectorCall = base + "-14";
+        peerCall = base + "-15";
+
+        std::random_device random;
+        workDir = std::filesystem::temp_directory_path() / ("radio-tests-" + std::to_string(random() % 1000000));
+        std::error_code ec;
+        std::filesystem::create_directories(workDir, ec);
+        if (ec) return "couldn't make " + workDir.string();
+
+        Settings station = settings;
+        station.engine = Engine::Direwolf;
+        station.operation = Operation::Duplex;
+        station.rxAudio = rx;
+        station.txAudio = tx;
+        station.catPort.clear();
+        station.audioFile.clear();
+        station.path.clear();
+
+        // The stand-in station: its own direwolf, driven over KISS by this program
+        Settings peerSettings = station;
+        peerSettings.callsign = peerCall;
+        int peerPort = os::freeTcpPort();
+        {
+            std::ofstream out(workDir / "peer.conf");
+            out << direwolfConfig(peerSettings, direwolfDevice(rx), direwolfDevice(tx), peerPort);
+        }
+        if (!peer.start(direwolfArgs("peer.conf"), workDir.string()))
+            return failSetup("couldn't start direwolf: " + peer.error());
+        auto deadline = Clock::now() + std::chrono::seconds(15);
+        while (!peerLink.connect("127.0.0.1", peerPort)) {
+            if (Clock::now() > deadline) return failSetup("direwolf didn't open its KISS port:\n" + peer.log());
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+        peerReader = std::thread([this] {
+            packet::KissDecoder decoder;
+            char buffer[1024];
+            long n;
+            while ((n = peerLink.read(buffer, sizeof buffer)) > 0)
+                for (const packet::Bytes& bytes : decoder.feed(std::string_view(buffer, static_cast<size_t>(n))))
+                    if (auto frame = packet::decode(bytes)) inbox.push({true, {}, *frame});
+        });
+
+        // The connector, with this program as its main program
+        int mainPort = os::freeTcpPort();
+        os::TcpListener listener;
+        if (!listener.listen(mainPort)) return failSetup(listener.error());
+        station.callsign = connectorCall;
+        station.mainAddress = "127.0.0.1:" + std::to_string(mainPort);
+        string ini = (workDir / "connector.ini").string();
+        if (!saveSettingsTo(station, ini)) return failSetup("couldn't write " + ini);
+        if (!connector.start({program, "--settings", ini, "--verbose", "--quit-on-disconnect"}))
+            return failSetup("couldn't start RadioConnector: " + connector.error());
+        if (!listener.accept(mainLink, 20000))
+            return failSetup("RadioConnector didn't connect: " + listener.error() + "\n" + connector.log());
+        mainReader = std::thread([this] {
+            string pending;
+            char buffer[4096];
+            long n;
+            while ((n = mainLink.read(buffer, sizeof buffer)) > 0) {
+                pending.append(buffer, static_cast<size_t>(n));
+                size_t newline;
+                while ((newline = pending.find('\n')) != string::npos) {
+                    inbox.push({false, pending.substr(0, newline), {}});
+                    pending.erase(0, newline + 1);
+                }
+            }
+        });
+        bool ready = waitFor(std::chrono::seconds(20), [&] {
+            return findLine("radio.status", [](const connector::Json& body) {
+                return body.value("state", "") == "ready";
+            }) != nullptr;
+        });
+        if (!ready) return failSetup("RadioConnector's radio never got ready:\n" + connector.log());
+        std::printf("Connector %s and stand-in station %s, on sound cards in %s / out %s\n",
+                    connectorCall.c_str(), peerCall.c_str(), rx.c_str(), tx.c_str());
+        return "";
+    }
+
+    bool setupFailed() const { return brokenSetup; }
+
+    // Two parts in, an ack for both, the text to the main program, then OK once it acks
+    bool receives() {
+        mark();
+        string one = "Over the air test, part one. ";
+        string two = "Part two.";
+        sendData("A01", 1, 2, one);
+        sendData("A01", 2, 2, two);
+        const connector::Json* received = nullptr;
+        bool ok = waitFor(seconds(), [&] {
+            received = findLine("message.received", [&](const connector::Json& body) {
+                return body.value("msgId", "") == peerCall + "/A01";
+            });
+            return received && heardFromConnector("RC1|A|A01|1-2");
+        });
+        if (!ok) return fail("no ack for both parts, or the text never reached the main program");
+        if ((*received)["body"].value("text", "") != one + two)
+            return fail("text came out as \"" + (*received)["body"].value("text", "") + "\"");
+        sendToConnector({{"v", 1}, {"type", "ack"}, {"re", (*received)["id"]}, {"body", connector::Json::object()}});
+        if (!waitFor(seconds(), [&] { return heardFromConnector("RC1|R|A01|OK"); }))
+            return fail("no RC1|R|A01|OK after the main program acked");
+        return true;
+    }
+
+    // Parts 1 and 3: the ack says which it has. Then part 2 completes it
+    bool missingPart() {
+        mark();
+        sendData("A02", 1, 3, "one ");
+        sendData("A02", 3, 3, "three");
+        if (!waitFor(seconds(), [&] { return heardFromConnector("RC1|A|A02|1,3"); }))
+            return fail("no RC1|A|A02|1,3 for the two parts sent");
+        sendData("A02", 2, 3, "two ");
+        if (!waitFor(seconds(), [&] { return heardFromConnector("RC1|A|A02|1-3"); }))
+            return fail("no RC1|A|A02|1-3 once part 2 came");
+        if (auto* received = findLine("message.received", [&](const connector::Json& body) {
+                return body.value("msgId", "") == peerCall + "/A02";
+            }))
+            sendToConnector({{"v", 1}, {"type", "ack"}, {"re", (*received)["id"]}, {"body", connector::Json::object()}});
+        return true;
+    }
+
+    // The main program sends a long message; the stand-in station acks every part and
+    // sends OK, and the main program sees it delivered
+    bool sends() {
+        mark();
+        string text;
+        for (int i = 1; text.size() < 400; i++)
+            text += "Line " + std::to_string(i) + " of the over the air sending test. ";
+        sendToConnector({{"v", 1}, {"type", "message.send"}, {"id", "t-1"}, {"re", nullptr},
+                         {"body", {{"to", peerCall}, {"text", text}}}});
+        std::map<int, string> parts;
+        int total = 0;
+        string id;
+        bool answered = false;
+        bool ok = waitFor(seconds() * 2, [&] {
+            for (size_t i = frameStart; i < frames.size(); i++) {
+                const packet::Frame& f = frames[i];
+                auto air = connector::parseAir(f.info);
+                if (f.source != connectorCall || f.destination != peerCall || !air ||
+                    air->kind != connector::AirFrame::Kind::Data) continue;
+                id = connector::hexId(air->id);
+                total = air->total;
+                parts[air->part] = air->text;
+            }
+            if (!answered && total > 0 && static_cast<int>(parts.size()) == total) {
+                answered = true;
+                sendFrame("RC1|A|" + id + "|1-" + std::to_string(total));
+                sendFrame("RC1|R|" + id + "|OK");
+            }
+            return findLine("message.status", [](const connector::Json& body) {
+                return body.value("state", "") == "delivered";
+            }) != nullptr;
+        });
+        if (!ok) {
+            if (findLine("message.accepted", [](const connector::Json&) { return true; }) == nullptr)
+                return fail("the connector didn't accept message.send");
+            return fail(total == 0 ? "the stand-in station heard no parts"
+                        : !answered ? "the stand-in station heard " + std::to_string(parts.size()) + " of " +
+                                      std::to_string(total) + " parts"
+                                    : "the connector never reported delivered after the ack and OK");
+        }
+        string joined;
+        for (auto& [number, part] : parts) joined += part;
+        if (joined != text) return fail("the parts didn't join back into the text sent");
+        return true;
+    }
+
+    const string& lastProblem() const { return problem; }
+    string connectorLog() { return connector.log(); }
+
+private:
+    std::chrono::seconds seconds() const { return std::chrono::seconds(options.airSeconds); }
+
+    string failSetup(const string& why) {
+        brokenSetup = true;
+        return why;
+    }
+
+    bool fail(const string& why) {
+        problem = why;
+        return false;
+    }
+
+    // Steps look only at what's heard after their start
+    void mark() {
+        lineStart = lines.size();
+        frameStart = frames.size();
+    }
+
+    bool waitFor(Clock::duration limit, const std::function<bool()>& done) {
+        auto deadline = Clock::now() + limit;
+        while (!done()) {
+            auto now = Clock::now();
+            if (now >= deadline) return false;
+            auto heard = inbox.pop(std::min<Clock::duration>(deadline - now, std::chrono::milliseconds(200)));
+            if (!heard) continue;
+            if (heard->frame) {
+                frames.push_back(heard->packet);
+            } else {
+                connector::Json json = connector::Json::parse(heard->line, nullptr, false);
+                if (!json.is_discarded()) lines.push_back(json);
+            }
+        }
+        return true;
+    }
+
+    const connector::Json* findLine(const string& type, const std::function<bool(const connector::Json&)>& match) {
+        for (size_t i = lineStart; i < lines.size(); i++) {
+            const connector::Json& line = lines[i];
+            if (line.value("type", "") == type && line.contains("body") && match(line["body"])) return &line;
+        }
+        return nullptr;
+    }
+
+    bool heardFromConnector(const string& info) const {
+        for (size_t i = frameStart; i < frames.size(); i++)
+            if (frames[i].source == connectorCall && frames[i].destination == peerCall && frames[i].info == info)
+                return true;
+        return false;
+    }
+
+    void sendData(const string& id, int part, int total, const string& text) {
+        sendFrame(connector::formatData(std::stoul(id, nullptr, 16), part, total, text));
+    }
+
+    void sendFrame(const string& info) {
+        peerLink.write(packet::kissEncode(packet::encodeUi(peerCall, connectorCall, info)));
+    }
+
+    void sendToConnector(const connector::Json& message) { mainLink.write(message.dump() + "\n"); }
+
+    const Options& options;
+    string program, connectorCall, peerCall, problem;
+    std::filesystem::path workDir;
+    bool brokenSetup = false;
+    Child peer, connector;
+    os::TcpConnection peerLink, mainLink;
+    std::thread peerReader, mainReader;
+    Inbox inbox;
+    std::vector<connector::Json> lines;
+    std::vector<packet::Frame> frames;
+    size_t lineStart = 0, frameStart = 0;
+};
+
+int runAir(const Options& options) {
+    AirTest test(options);
+    string why = test.prepare();
+    if (!why.empty() && !test.setupFailed()) {
+        std::printf("SKIP  over the air: %s\n", why.c_str());
+        appendSummary("### Over the air (" + runnerName() + ")\n\n⏭️ Skipped: " + cell(why) + "\n\n");
+        return skippedCode;
+    }
+    if (!why.empty()) {
+        std::printf("FAIL  over the air setup:\n%s\n", indent(why).c_str());
+        annotate("error", "src/tests/radio_tests.cpp", 0, "Over the air setup failed", why);
+        appendSummary("### Over the air (" + runnerName() + ")\n\n❌ Setup failed: " + cell(why) + "\n\n");
+        return 1;
+    }
+    struct Step {
+        const char* name;
+        bool (AirTest::*run)();
+    };
+    const Step steps[] = {
+        {"Receives a message in two parts, acks it, and sends OK", &AirTest::receives},
+        {"Acks the parts it has when one is missing", &AirTest::missingPart},
+        {"Sends a long message and reports it delivered", &AirTest::sends},
+    };
+    int failed = 0;
+    string summary = "### Over the air (" + runnerName() + ")\n\n| Result | Step |\n|---|---|\n";
+    for (const Step& step : steps) {
+        bool live = os::isTerminal(stdout);   // In a terminal, "...." is overwritten by the result
+        if (live) std::printf("....  %s", step.name);
+        std::fflush(stdout);
+        auto start = Clock::now();
+        bool ok = (test.*step.run)();
+        double took = std::chrono::duration<double>(Clock::now() - start).count();
+        std::printf("%s%s  %s (%.0f s)\n", live ? "\r" : "", ok ? "PASS" : "FAIL", step.name, took);
+        summary += string("| ") + (ok ? "✅ PASS" : "❌ FAIL") + " | " + step.name + " |\n";
+        if (ok) continue;
+        failed++;
+        std::printf("     %s\n", test.lastProblem().c_str());
+        annotate("error", "src/tests/radio_tests.cpp", 0, string("Over the air: ") + step.name, test.lastProblem());
+    }
+    if (failed) std::printf("     RadioConnector's log:\n%s\n", indent(test.connectorLog()).c_str());
+    appendSummary(summary + "\n");
+    return failed ? 1 : 0;
+}
+
+// ---- Command line --------------------------------------------------------------------
+
+void usage(const char* program) {
+    std::printf(
+        "Usage: %s [options]\n"
+        "With no options it runs every test group. A group that can't run here (no decoder,\n"
+        "no sound cards) is skipped, not failed.\n"
+        "\n"
+        "Groups: unit, audio, cat, air\n"
+        "  --only GROUPS        run just these, e.g. --only unit,cat\n"
+        "  --skip GROUPS        run all but these, e.g. --skip air\n"
+        "\n"
+        "audio\n"
+        "  --audio-dir DIR      test audio to decode (default: test-audio next to the program,\n"
+        "                       else the source's tests/audio)\n"
+        "  --generate DIR       write the test audio files to DIR, then exit\n"
+        "cat\n"
+        "  --cat-port PORT      test a real radio on PORT (e.g. COM5) instead of Hamlib's\n"
+        "                       dummy rig. It is keyed for half a second\n"
+        "  --cat-model N        Hamlib model (default: the one in settings.ini)\n"
+        "  --cat-baud N         serial speed (default: the one in settings.ini)\n"
+        "air (RadioConnector and a stand-in station over the sound cards, e.g. VB-Cable)\n"
+        "  --rx-audio DEVICE    sound card to listen on (default: settings.ini's)\n"
+        "  --tx-audio DEVICE    sound card to play into (default: settings.ini's)\n"
+        "  --callsign CALL      callsign for the two stations, as CALL-14 and CALL-15\n"
+        "                       (default: settings.ini's, else N0CALL)\n"
+        "  --air-timeout SECS   longest wait for one step (default 60)\n",
+        program);
+}
+
+std::set<string> parseGroups(const string& list, bool& ok) {
+    std::set<string> groups;
+    size_t start = 0;
+    while (start <= list.size()) {
+        size_t comma = list.find(',', start);
+        string group = list.substr(start, comma == string::npos ? string::npos : comma - start);
+        if (std::find(allGroups.begin(), allGroups.end(), group) == allGroups.end()) ok = false;
+        groups.insert(group);
+        if (comma == string::npos) break;
+        start = comma + 1;
+    }
+    return groups;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
-    std::string command = argc > 1 ? argv[1] : "";
-    if (command == "unit") return runUnit();
-    if (command == "audio" && argc > 2) return runAudio(argv[2]);
-    if (command == "generate" && argc > 2) {
-        std::string error;
-        if (!writeTestAudio(argv[2], error)) {
-            std::fprintf(stderr, "%s\n", error.c_str());
-            return 1;
+    Options options;
+    for (int i = 1; i < argc; i++) {
+        string arg = argv[i];
+        bool hasValue = i + 1 < argc;
+        string value = hasValue ? argv[i + 1] : "";
+        auto number = [&](int& out) {
+            out = std::atoi(value.c_str());
+            i++;
+            return out > 0;
+        };
+        bool ok = true;
+        if (arg == "--help" || arg == "-h") {
+            usage(argv[0]);
+            return 0;
+        } else if (!hasValue) {
+            ok = false;
+        } else if (arg == "--only") {
+            options.groups = parseGroups(value, ok);
+            i++;
+        } else if (arg == "--skip") {
+            for (const string& group : parseGroups(value, ok)) options.groups.erase(group);
+            i++;
+        } else if (arg == "--audio-dir") {
+            options.audioDir = value;
+            i++;
+        } else if (arg == "--generate") {
+            string error;
+            if (!writeTestAudio(value, error)) {
+                std::fprintf(stderr, "%s\n", error.c_str());
+                return 1;
+            }
+            std::printf("Wrote the test files to %s\n", value.c_str());
+            return 0;
+        } else if (arg == "--cat-port") {
+            options.catPort = value;
+            i++;
+        } else if (arg == "--cat-model") {
+            ok = number(options.catModel);
+        } else if (arg == "--cat-baud") {
+            ok = number(options.catBaud);
+        } else if (arg == "--rx-audio") {
+            options.rxAudio = value;
+            i++;
+        } else if (arg == "--tx-audio") {
+            options.txAudio = value;
+            i++;
+        } else if (arg == "--callsign") {
+            options.callsign = value;
+            i++;
+        } else if (arg == "--air-timeout") {
+            ok = number(options.airSeconds);
+        } else {
+            ok = false;
         }
-        std::printf("Wrote the test files to %s\n", argv[2]);
-        return 0;
+        if (!ok) {
+            std::fprintf(stderr, "Didn't understand %s%s%s\n\n", arg.c_str(), hasValue ? " " : "", value.c_str());
+            usage(argv[0]);
+            return 2;
+        }
     }
-    std::fprintf(stderr, "Usage: %s unit | audio <dir> | generate <dir>\n", argv[0]);
-    return 2;
+
+    struct Group {
+        const char* key;
+        const char* title;
+        std::function<int()> run;
+    };
+    const Group groups[] = {
+        {"unit", "Unit tests", [] { return runUnit(); }},
+        {"audio", "Audio files", [&] {
+            string dir = options.audioDir.empty() ? findTestAudioDir() : options.audioDir;
+            if (dir.empty()) {
+                std::printf("SKIP  no test audio found; give --audio-dir\n");
+                return skippedCode;
+            }
+            std::printf("From %s\n", dir.c_str());
+            return runAudio(dir);
+        }},
+        {"cat", "CAT radio control", [&] { return runCat(options); }},
+        {"air", "Over the air", [&] { return runAir(options); }},
+    };
+    std::vector<std::pair<string, int>> results;
+    for (const Group& group : groups) {
+        if (!options.groups.count(group.key)) continue;
+        std::printf("\n== %s ==\n", group.title);
+        std::fflush(stdout);
+        results.emplace_back(group.title, group.run());
+    }
+
+    std::printf("\n== Summary ==\n");
+    bool anyFailed = false;
+    for (const auto& [title, code] : results) {
+        const char* result = code == 0 ? "PASS" : code == skippedCode ? "SKIP" : "FAIL";
+        anyFailed = anyFailed || (code != 0 && code != skippedCode);
+        std::printf("%s  %s\n", result, title.c_str());
+    }
+    return anyFailed ? 1 : 0;
 }

@@ -1,6 +1,6 @@
 // backend.h - Everything that differs between Windows, Linux and macOS.
-#ifndef HAMPROOF_BACKEND_H
-#define HAMPROOF_BACKEND_H
+#ifndef RTC_BACKEND_H
+#define RTC_BACKEND_H
 
 #include <cstdio>
 #include <functional>
@@ -21,9 +21,11 @@ public:
     Process(const Process&) = delete;
     Process& operator=(const Process&) = delete;
 
-    // captureStdout: read() gets its stdout. pipeStdin: write() feeds its stdin
+    // captureStdout: read() gets its stdout (and its stderr too, with mergeStderr).
+    // pipeStdin: write() feeds its stdin
     bool start(const std::vector<std::string>& argv, bool captureStdout = true,
-               bool pipeStdin = false, const std::string& workingDir = "");
+               bool pipeStdin = false, const std::string& workingDir = "",
+               bool mergeStderr = false);
     long read(char* buf, size_t size);   // >0 bytes read, 0 = end of output, -1 = error
     bool write(std::string_view data);   // false if the child has gone or stdin isn't piped
     void closeStdin();
@@ -67,6 +69,25 @@ public:
     long read(char* buf, size_t size);   // Blocks. >0 bytes read, 0 = closed, -1 = error
     bool write(std::string_view data);
     void shutdown();                     // A blocked read() then returns 0
+    void close();
+    const std::string& error() const { return lastError; }
+
+private:
+    friend class TcpListener;
+    long long sock = -1;                 // SOCKET on Windows
+    std::string lastError;
+};
+
+// Accepts connections on 127.0.0.1. The test program uses it to stand in for the main program
+class TcpListener {
+public:
+    TcpListener() = default;
+    ~TcpListener();
+    TcpListener(const TcpListener&) = delete;
+    TcpListener& operator=(const TcpListener&) = delete;
+
+    bool listen(int port);
+    bool accept(TcpConnection& connection, int timeoutMs);   // false on timeout or error
     void close();
     const std::string& error() const { return lastError; }
 
@@ -128,4 +149,4 @@ std::string executableDir();          // "" if unknown
 
 } // namespace os
 
-#endif //HAMPROOF_BACKEND_H
+#endif //RTC_BACKEND_H
