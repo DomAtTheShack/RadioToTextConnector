@@ -24,7 +24,8 @@ const char* packetModemName(int baud);
 // Sound card name for ADEVICE. Always "default" on macOS
 std::string direwolfDevice(const std::string& name);
 
-// AGW and the default KISS port are off so another direwolf doesn't clash
+// AGW and the default KISS port are off so another direwolf doesn't clash. direwolf keys
+// the radio itself, the way settings.ptt says
 std::string direwolfConfig(const Settings& settings, const std::string& rxDevice,
                            const std::string& txDevice, int kissPort);
 std::vector<std::string> direwolfArgs(const std::string& configPath);

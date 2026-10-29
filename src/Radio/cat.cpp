@@ -72,7 +72,8 @@ std::string radioName(rig_model_t model) {
     return std::string(caps->mfg_name) + " " + caps->model_name;
 }
 
-Cat::Cat(rig_model_t model, const std::string& port, int baud) {
+Cat::Cat(rig_model_t model, const std::string& port, int baud, const std::string& pttLine,
+         const std::string& pttPort) {
     rig_set_debug(RIG_DEBUG_NONE);   // Keep Hamlib off the screen
 
     rig_ = rig_init(model);
@@ -88,11 +89,31 @@ Cat::Cat(rig_model_t model, const std::string& port, int baud) {
         if (model != RIG_MODEL_DUMMY && model != RIG_MODEL_NETRIGCTL) {
             setConf(rig_, "serial_speed", std::to_string(baud));
         }
+        if (!pttLine.empty()) {
+            setConf(rig_, "ptt_type", pttLine);
+            setConf(rig_, "ptt_pathname", pttPort);
+        }
         check(rig_open(rig_), ("open " + port).c_str());
     } catch (...) {
         rig_cleanup(rig_);
         throw;
     }
+}
+
+std::unique_ptr<Cat> openPtt(const Settings& s) {
+    if (std::string problem = pttProblem(s); !problem.empty()) throw std::runtime_error(problem);
+    switch (s.ptt) {
+        case PttType::Vox:
+            return nullptr;
+        case PttType::Cat:
+            return std::make_unique<Cat>(s.rigModel, s.catPort, s.catBaud);
+        case PttType::Rts:
+        case PttType::Dtr:
+            // Only the line: Hamlib's dummy rig, with a real port for PTT
+            return std::make_unique<Cat>(RIG_MODEL_DUMMY, "", 0, s.ptt == PttType::Rts ? "RTS" : "DTR",
+                                         s.keyingPort());
+    }
+    return nullptr;
 }
 
 Cat::~Cat() {

@@ -8,9 +8,14 @@
 enum class Operation { Receive, Transmit, Duplex };
 enum class Engine { Minimodem, Direwolf };
 enum class Protocol { Rtty, Bell202 };
+// How the transmitter is keyed: VOX, a CAT command, or the RTS/DTR line of a serial port
+// (which can be a second port, e.g. the FTDX3000's Standard port)
+enum class PttType { Vox, Cat, Rts, Dtr };
 
 // RIG_MODEL_X6100, without needing Hamlib's headers here
 constexpr int defaultRigModel = 3087;
+// RIG_MODEL_NETRIGCTL: the user's own rigctld, with catPort = host:port
+constexpr int ownRigctldModel = 2;
 
 struct Settings {
     Operation operation = Operation::Receive;
@@ -28,9 +33,12 @@ struct Settings {
     std::string txAudio;
     std::string rxAudioDesc;
     std::string txAudioDesc;
-    std::string catPort;       // Empty = VOX
+    // The radio's CAT port: a serial port, or host:port with ownRigctldModel. Empty = none
+    std::string catPort;
     int catBaud = 19200;
     int rigModel = defaultRigModel;   // Hamlib model number
+    PttType ptt = PttType::Vox;
+    std::string pttPort;       // RTS/DTR: the serial port. Empty = the CAT port
     std::string audioFile;     // Empty = sound card
     bool quiet = false;        // minimodem -q
 
@@ -51,7 +59,14 @@ struct Settings {
     bool packet()    const { return engine == Engine::Direwolf; }
     bool transmits() const { return operation != Operation::Receive; }
     bool receives()  const { return operation != Operation::Transmit; }
+    bool hasCat()    const { return !catPort.empty(); }
+    bool keysRadio() const { return ptt != PttType::Vox; }
+    // The serial port RTS/DTR keying uses
+    const std::string& keyingPort() const { return pttPort.empty() ? catPort : pttPort; }
 };
+
+// "" if the PTT and CAT settings work together, else what's wrong
+std::string pttProblem(const Settings& settings);
 
 // key=value lines. Unknown keys and bad values keep the default
 std::string formatSettings(const Settings& settings);
@@ -76,5 +91,8 @@ const char* engineName(Engine engine);
 const char* protocolName(Protocol protocol);
 // "Off", "Auto", "16 check bytes", ...
 std::string fx25Name(int fx25);
+// "vox", "cat", "rts", "dtr": the settings file and the connector's JSON
+const char* pttKey(PttType ptt);
+bool parsePttKey(const std::string& text, PttType& ptt);
 
 #endif //RTC_SETTINGS_H

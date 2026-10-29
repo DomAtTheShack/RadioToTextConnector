@@ -252,6 +252,39 @@ void testPacketSettings() {
     CHECK(old.packetBaud == 1200);                        // 4800 isn't a direwolf speed we offer
 }
 
+void testPttSettings() {
+    Settings s;
+    s.catPort = "COM5";
+    s.ptt = PttType::Rts;
+    s.pttPort = "COM6";
+    Settings back = parseSettings(formatSettings(s));
+    CHECK(back.ptt == PttType::Rts && back.pttPort == "COM6" && back.keyingPort() == "COM6");
+    // Files from before ptt=: a CAT port meant CAT PTT, no port meant VOX
+    CHECK(parseSettings("cat_port=COM5\n").ptt == PttType::Cat);
+    CHECK(parseSettings("cat_port=\n").ptt == PttType::Vox);
+    CHECK(parseSettings("cat_port=COM5\nptt=vox\n").ptt == PttType::Vox);   // Radio control only
+    CHECK(parseSettings("ptt=sometimes\n").ptt == PttType::Vox);
+    CHECK(Settings{}.ptt == PttType::Vox);
+
+    Settings p;
+    CHECK(pttProblem(p).empty());
+    p.ptt = PttType::Cat;
+    CHECK(!pttProblem(p).empty());   // No CAT port to send the command on
+    p.catPort = "COM5";
+    CHECK(pttProblem(p).empty());
+    p.ptt = PttType::Dtr;
+    CHECK(pttProblem(p).empty() && p.keyingPort() == "COM5");   // The CAT port's own line
+    p.catPort.clear();
+    CHECK(!pttProblem(p).empty());   // No port at all
+    p.pttPort = "/dev/ttyUSB1";
+    CHECK(pttProblem(p).empty());    // Keying only, no radio control
+    p.catPort = "127.0.0.1:4532";    // Their own rigctld for CAT...
+    p.rigModel = ownRigctldModel;
+    CHECK(pttProblem(p).empty());    // ...and RTS on a real port is fine
+    p.pttPort.clear();
+    CHECK(!pttProblem(p).empty());   // An address has no RTS line
+}
+
 void testFx25() {
     Settings s;
     s.engine = Engine::Direwolf;
@@ -403,10 +436,19 @@ void testDirewolfConfig() {
     CHECK(vox.find("PTT") == std::string::npos);           // VOX: direwolf mustn't key anything
 
     s.catPort = "COM5";
+    CHECK(direwolfConfig(s, "1", "2", 7001).find("PTT") == std::string::npos);   // A CAT port alone keys nothing
+    s.ptt = PttType::Cat;
     s.catBaud = 38400;
     s.rigModel = 1037;   // FTDX-3000
     CHECK(direwolfConfig(s, "1", "2", 7001).find("PTT RIG 1037 COM5 38400\n") != std::string::npos);
-    s.rigModel = 2;      // rigctld: host:port, no serial speed
+    s.ptt = PttType::Rts;   // The FTDX3000's Standard port, next to CAT on its Enhanced port
+    s.pttPort = "COM6";
+    CHECK(direwolfConfig(s, "1", "2", 7001).find("PTT COM6 RTS\n") != std::string::npos);
+    s.ptt = PttType::Dtr;   // The CAT port's own line
+    s.pttPort.clear();
+    CHECK(direwolfConfig(s, "1", "2", 7001).find("PTT COM5 DTR\n") != std::string::npos);
+    s.ptt = PttType::Cat;
+    s.rigModel = ownRigctldModel;   // rigctld: host:port, no serial speed
     s.catPort = "localhost:4532";
     CHECK(direwolfConfig(s, "1", "2", 7001).find("PTT RIG 2 localhost:4532\n") != std::string::npos);
 
@@ -802,15 +844,34 @@ void testConnectorConfig() {
     CHECK(!change.ok && change.field == "fx25");
     CHECK(s.callsign == "N0CALL-7");   // Nothing changes on an error
     CHECK(!applyConfig(s, {{"colour", "red"}}).ok);
-    CHECK(applyConfig(s, {{"ptt", {{"type", "cat"}}}}).field == "ptt.port");   // Needs a port
+    CHECK(config["radio"]["type"] == "none");
+    CHECK(applyConfig(s, {{"radio", {{"type", "cat"}}}}).field == "radio.port");   // Needs a port
+    CHECK(applyConfig(s, {{"ptt", {{"type", "cat"}}}}).field == "ptt");   // Needs radio control
 
-    change = applyConfig(s, {{"ptt", {{"type", "cat"}, {"port", "COM5"}, {"rigModel", 3073}}}});
+    change = applyConfig(s, {{"radio", {{"type", "cat"}, {"port", "COM5"}, {"rigModel", 3073}}}});
     CHECK(change.ok && change.restartRequired);
     CHECK(s.catPort == "COM5" && s.rigModel == 3073 && s.catBaud == 19200);
-    CHECK(configToJson(s)["ptt"]["type"] == "cat");
-    change = applyConfig(s, {{"ptt", {{"type", "rigctld"}, {"port", "127.0.0.1:4532"}}}});
-    CHECK(change.ok && s.rigModel == 2 && configToJson(s)["ptt"]["type"] == "rigctld");
-    CHECK(applyConfig(s, {{"ptt", {{"type", "vox"}}}}).ok && s.catPort.empty());
+    CHECK(s.ptt == PttType::Vox);   // Radio control alone doesn't change the keying
+    CHECK(configToJson(s)["radio"]["type"] == "cat");
+    change = applyConfig(s, {{"ptt", {{"type", "rts"}, {"port", "COM6"}}}});
+    CHECK(change.ok && change.restartRequired && s.ptt == PttType::Rts && s.pttPort == "COM6");
+    CHECK(configToJson(s)["ptt"]["port"] == "COM6");
+    CHECK(applyConfig(s, {{"ptt", {{"type", "cat"}, {"port", "COM6"}}}}).field == "ptt.port");   // rts/dtr only
+    change = applyConfig(s, {{"ptt", {{"type", "cat"}}}});
+    CHECK(change.ok && s.ptt == PttType::Cat && s.pttPort.empty());
+    CHECK(!configToJson(s)["ptt"].contains("port"));
+    // CAT keying needs radio control, so taking the radio away alone is refused
+    CHECK(applyConfig(s, {{"radio", {{"type", "none"}}}}).field == "ptt");
+    CHECK(s.catPort == "COM5");
+    CHECK(applyConfig(s, {{"radio", {{"type", "none"}}}, {"ptt", {{"type", "dtr"}, {"port", "COM7"}}}}).ok);
+    CHECK(!s.hasCat() && s.ptt == PttType::Dtr && s.keyingPort() == "COM7");
+    // Their own rigctld for CAT, with DTR still on its own port
+    change = applyConfig(s, {{"radio", {{"type", "rigctld"}, {"port", "127.0.0.1:4532"}}}});
+    CHECK(change.ok && s.rigModel == ownRigctldModel && configToJson(s)["radio"]["type"] == "rigctld");
+    CHECK(applyConfig(s, {{"ptt", {{"type", "dtr"}, {"port", ""}}}}).field == "ptt");   // No line on an address
+    CHECK(applyConfig(s, {{"ptt", {{"type", "cat"}}}}).ok && s.ptt == PttType::Cat);
+    CHECK(applyConfig(s, {{"ptt", {{"type", "vox"}}}, {"radio", {{"type", "none"}}}}).ok && !s.hasCat());
+    CHECK(applyConfig(s, {{"ptt", {{"type", "push"}}}}).field == "ptt.type");
 
     change = applyConfig(s, {{"main", "localhost:9000"}});
     CHECK(change.ok && change.mainChanged && !change.restartRequired);
@@ -843,6 +904,7 @@ int runUnit() {
         {"Signal length", testSignalLength},
         {"Accuracy scoring", testAccuracy},
         {"Packet settings", testPacketSettings},
+        {"PTT settings", testPttSettings},
         {"Callsigns", testCallsigns},
         {"AX.25 frames", testAx25Frames},
         {"Splitting long text", testSplitInfo},
@@ -1130,8 +1192,8 @@ public:
         if (program.empty()) return "RadioConnector isn't next to RadioTests";
         if (rx.empty() || tx.empty())
             return "no sound cards set. Pick them in the menu program, or give --rx-audio and --tx-audio";
-        if (!settings.catPort.empty() && !devicesGiven)
-            return "PTT is set to a radio over CAT, so this would transmit for real. Give --rx-audio "
+        if (settings.keysRadio() && !devicesGiven)
+            return "PTT is set to key a radio, so this would transmit for real. Give --rx-audio "
                    "and --tx-audio to run it anyway";
 
         string base = baseCallsign(options.callsign.empty() ? settings.callsign : options.callsign);
@@ -1150,6 +1212,8 @@ public:
         station.rxAudio = rx;
         station.txAudio = tx;
         station.catPort.clear();
+        station.ptt = PttType::Vox;
+        station.pttPort.clear();
         station.audioFile.clear();
         station.path.clear();
 

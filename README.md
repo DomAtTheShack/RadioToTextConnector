@@ -6,8 +6,9 @@ Send and receive text over ham radio.
 - **direwolf**: AX.25 packets at 300, 1200 or 9600 baud, with FX.25 error correction. One
   packet per line, with your callsign and error checking.
 
-PTT is CAT (Hamlib) or VOX. Common Icom, Yaesu, Kenwood, Elecraft and Xiegu radios are
-listed; any other Hamlib model works by number, or through `rigctld`.
+PTT is VOX, a CAT command (Hamlib), or the RTS/DTR line of a serial port, which can be a
+second port (e.g. the FTDX3000's Standard port). Common Icom, Yaesu, Kenwood, Elecraft and
+Xiegu radios are listed; any other Hamlib model works by number, or through `rigctld`.
 
 ### The programs
 
@@ -150,7 +151,7 @@ run on this computer is skipped, not failed:
   real radio instead (it is keyed for half a second)
 - `air`: starts RadioConnector and a stand-in station on the sound cards from
   `settings.ini` (e.g. VB-Cable looped back), then checks receiving, a missing part, and
-  sending with acks. Skipped without sound cards, or when PTT is a radio over CAT
+  sending with acks. Skipped without sound cards, or when PTT keys a radio (CAT, RTS or DTR)
 
 `--only unit,cat` or `--skip air` picks groups; `RadioTests --help` lists every option.
 To regenerate the test audio: `RadioTests --generate ../src/tests/audio` from the build folder.

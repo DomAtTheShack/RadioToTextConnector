@@ -8,18 +8,29 @@ namespace connector {
 
 namespace {
 
-constexpr int rigctldModel = 2;   // Hamlib's NET rigctl: port is host:port
-
 Json fx25ToJson(int fx25) {
     if (fx25 <= 0) return "off";
     if (fx25 == 1) return "auto";
     return fx25;
 }
 
-Json pttToJson(const Settings& s) {
-    if (s.catPort.empty()) return {{"type", "vox"}};
-    if (s.rigModel == rigctldModel) return {{"type", "rigctld"}, {"port", s.catPort}};
+std::string radioType(const Settings& s) {
+    if (!s.hasCat()) return "none";
+    return s.rigModel == ownRigctldModel ? "rigctld" : "cat";
+}
+
+Json radioToJson(const Settings& s) {
+    std::string type = radioType(s);
+    if (type == "none") return {{"type", "none"}};
+    if (type == "rigctld") return {{"type", "rigctld"}, {"port", s.catPort}};
     return {{"type", "cat"}, {"port", s.catPort}, {"baud", s.catBaud}, {"rigModel", s.rigModel}};
+}
+
+// port: the RTS/DTR serial port. "" = the radio's CAT port
+Json pttToJson(const Settings& s) {
+    Json ptt = {{"type", pttKey(s.ptt)}};
+    if (s.ptt == PttType::Rts || s.ptt == PttType::Dtr) ptt["port"] = s.pttPort;
+    return ptt;
 }
 
 bool validIpv4(const std::string& host) {
@@ -57,6 +68,7 @@ Json configToJson(const Settings& s) {
         {"path", s.path},
         {"rxAudio", s.rxAudio},
         {"txAudio", s.txAudio},
+        {"radio", radioToJson(s)},
         {"ptt", pttToJson(s)},
         {"retry", {{"tries", s.retryTries}, {"extraWaitSeconds", s.retryExtraWait}}},
         {"holdForMainSeconds", s.holdForMain},
@@ -107,54 +119,75 @@ ConfigChange applyConfig(Settings& settings, const Json& patch) {
             std::string& desc = key == "rxAudio" ? s.rxAudioDesc : s.txAudioDesc;
             if (name != value.get<std::string>()) desc.clear();   // The old description no longer fits
             name = value.get<std::string>();
-        } else if (key == "ptt") {
+        } else if (key == "radio") {
+            // Radio control (CAT): none, a radio on a serial port, or the user's own rigctld
             if (!value.is_object()) return fail(key, "must be an object");
-            std::string type = s.catPort.empty() ? "vox" : s.rigModel == rigctldModel ? "rigctld" : "cat";
+            std::string type = radioType(s);
             if (value.contains("type")) {
-                if (!value["type"].is_string()) return fail("ptt.type", "must be vox, cat or rigctld");
+                if (!value["type"].is_string()) return fail("radio.type", "must be none, cat or rigctld");
                 type = value["type"].get<std::string>();
             }
             for (const auto& [field, fieldValue] : value.items())
                 if (field != "type" && field != "port" && field != "baud" && field != "rigModel")
-                    return fail("ptt." + field, "unknown setting");
-            if (type == "vox") {
+                    return fail("radio." + field, "unknown setting");
+            if (type == "none") {
+                for (const char* field : {"port", "baud", "rigModel"})
+                    if (value.contains(field)) return fail(std::string("radio.") + field, "isn't used without a radio");
                 s.catPort.clear();
             } else if (type == "cat" || type == "rigctld") {
-                bool wasType = (type == "rigctld") == (s.rigModel == rigctldModel) && !s.catPort.empty();
+                bool wasType = radioType(s) == type;
                 if (value.contains("port")) {
                     if (!value["port"].is_string() || value["port"].get<std::string>().empty())
-                        return fail("ptt.port", type == "cat" ? "must be a serial port, e.g. COM5"
-                                                              : "must be host:port, e.g. 127.0.0.1:4532");
+                        return fail("radio.port", type == "cat" ? "must be a serial port, e.g. COM5"
+                                                                : "must be host:port, e.g. 127.0.0.1:4532");
                     s.catPort = value["port"].get<std::string>();
                 } else if (!wasType) {
-                    return fail("ptt.port", "is needed for " + type);
+                    return fail("radio.port", "is needed for " + type);
                 }
                 if (type == "rigctld") {
                     std::string host;
                     int port = 0;
                     if (!parseHostPort(s.catPort, host, port))
-                        return fail("ptt.port", "must be host:port, e.g. 127.0.0.1:4532");
+                        return fail("radio.port", "must be host:port, e.g. 127.0.0.1:4532");
                     if (value.contains("baud") || value.contains("rigModel"))
-                        return fail(value.contains("baud") ? "ptt.baud" : "ptt.rigModel", "isn't used with rigctld");
-                    s.rigModel = rigctldModel;
+                        return fail(value.contains("baud") ? "radio.baud" : "radio.rigModel",
+                                    "isn't used with rigctld");
+                    s.rigModel = ownRigctldModel;
                 } else {
                     if (value.contains("baud")) {
                         auto baud = intIn(value["baud"], 300, 1000000);
-                        if (!baud) return fail("ptt.baud", "must be a baud rate, e.g. 19200");
+                        if (!baud) return fail("radio.baud", "must be a baud rate, e.g. 19200");
                         s.catBaud = *baud;
                     }
                     if (value.contains("rigModel")) {
                         auto model = intIn(value["rigModel"], 1, 99999);
-                        if (!model || *model == rigctldModel)
-                            return fail("ptt.rigModel", "must be a Hamlib model number (use type rigctld for 2)");
+                        if (!model || *model == ownRigctldModel)
+                            return fail("radio.rigModel", "must be a Hamlib model number (use type rigctld for 2)");
                         s.rigModel = *model;
-                    } else if (s.rigModel == rigctldModel) {
+                    } else if (s.rigModel == ownRigctldModel) {
                         s.rigModel = defaultRigModel;
                     }
                 }
             } else {
-                return fail("ptt.type", "must be vox, cat or rigctld");
+                return fail("radio.type", "must be none, cat or rigctld");
             }
+        } else if (key == "ptt") {
+            // How to key: vox, cat (a command to the radio), or rts/dtr on a serial port
+            if (!value.is_object()) return fail(key, "must be an object");
+            for (const auto& [field, fieldValue] : value.items())
+                if (field != "type" && field != "port") return fail("ptt." + field, "unknown setting");
+            if (value.contains("type")) {
+                if (!value["type"].is_string() || !parsePttKey(value["type"].get<std::string>(), s.ptt))
+                    return fail("ptt.type", "must be vox, cat, rts or dtr");
+            }
+            bool line = s.ptt == PttType::Rts || s.ptt == PttType::Dtr;
+            if (value.contains("port")) {
+                if (!line) return fail("ptt.port", "is only for rts and dtr (cat keys through the radio port)");
+                if (!value["port"].is_string())
+                    return fail("ptt.port", "must be a serial port, e.g. COM6, or \"\" for the radio's port");
+                s.pttPort = value["port"].get<std::string>();
+            }
+            if (!line) s.pttPort.clear();
         } else if (key == "retry") {
             if (!value.is_object()) return fail(key, "must be an object");
             for (const auto& [field, fieldValue] : value.items()) {
@@ -185,10 +218,14 @@ ConfigChange applyConfig(Settings& settings, const Json& patch) {
         }
     }
 
+    // Checked once the whole patch is in, so radio and ptt can change together
+    if (std::string problem = pttProblem(s); !problem.empty()) return fail("ptt", problem);
+
     change.restartRequired = s.callsign != settings.callsign || s.packetBaud != settings.packetBaud ||
                              s.fx25 != settings.fx25 || s.rxAudio != settings.rxAudio ||
                              s.txAudio != settings.txAudio || s.catPort != settings.catPort ||
-                             s.catBaud != settings.catBaud || s.rigModel != settings.rigModel;
+                             s.catBaud != settings.catBaud || s.rigModel != settings.rigModel ||
+                             s.ptt != settings.ptt || s.pttPort != settings.pttPort;
     change.mainChanged = s.mainAddress != settings.mainAddress;
     settings = s;
     return change;

@@ -220,16 +220,27 @@ can start the radio before the main program connects. `config.set` takes any sub
   "fx25":"auto",
   "path":[],
   "rxAudio":"...", "txAudio":"...",
-  "ptt":{"type":"cat","port":"COM5","baud":19200,"rigModel":3087},
+  "radio":{"type":"cat","port":"COM5","baud":38400,"rigModel":1037},
+  "ptt":{"type":"rts","port":"COM6"},
   "retry":{"tries":4,"extraWaitSeconds":10},
   "holdForMainSeconds":180,
   "main":"127.0.0.1:9000"
 }
 ```
 
-Changing `callsign`, `packetBaud`, `fx25`, the audio devices or `ptt` restarts direwolf.
-The reply says so with `restartRequired: true`, and messages in flight are kept.
-`ptt.type` can be `vox`, `cat` or `rigctld`.
+Changing `callsign`, `packetBaud`, `fx25`, the audio devices, `radio` or `ptt` restarts
+direwolf. The reply says so with `restartRequired: true`, and messages in flight are kept.
+
+direwolf keys the radio itself; the connector never sets the frequency or mode.
+
+| Field | Values |
+|---|---|
+| `radio.type` | `none`; `cat` (a radio on `port`, with `baud` and Hamlib `rigModel`); `rigctld` (your own rigctld, `port` = host:port) |
+| `ptt.type` | `vox` (the default, e.g. FM on VHF/UHF); `cat` (a command over the radio's CAT port, needs `radio`); `rts` or `dtr` (that line of a serial port) |
+| `ptt.port` | `rts`/`dtr` only: the serial port, e.g. a second USB port like the FTDX3000's Standard port. `""` = the radio's CAT port |
+
+`radio` and `ptt` are checked together: `ptt` `cat` without a `radio`, or `rts` on a
+rigctld address, is an error (field `ptt`). Change both in one `config.set`.
 
 The cache is the connector's own `connector.ini`, next to RadioConnectorCli's
 `settings.ini` (or the file given with `--settings`). The first run copies `settings.ini`,

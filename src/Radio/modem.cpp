@@ -73,11 +73,20 @@ std::string direwolfConfig(const Settings& s, const std::string& rxDevice,
         "MODEM " + std::to_string(s.packetBaud) + "\n";
     // Receiving decodes FX.25 either way
     if (s.fx25 > 0) config += "FX25TX " + std::to_string(s.fx25) + "\n";
-    if (!s.catPort.empty()) {
-        // Model 2 (rigctld) takes host:port and no baud rate
-        config += "PTT RIG " + std::to_string(s.rigModel) + " " + s.catPort;
-        if (s.rigModel != 2) config += " " + std::to_string(s.catBaud);
-        config += "\n";
+    switch (s.ptt) {
+        case PttType::Vox:
+            break;
+        case PttType::Cat:
+            // Model 2 (rigctld) takes host:port and no baud rate
+            config += "PTT RIG " + std::to_string(s.rigModel) + " " + s.catPort;
+            if (s.rigModel != ownRigctldModel) config += " " + std::to_string(s.catBaud);
+            config += "\n";
+            break;
+        case PttType::Rts:
+        case PttType::Dtr:
+            // The CAT port's own line, or a second port (e.g. the FTDX3000's Standard port)
+            config += "PTT " + s.keyingPort() + (s.ptt == PttType::Rts ? " RTS\n" : " DTR\n");
+            break;
     }
     config +=
         "AGWPORT 0\n"

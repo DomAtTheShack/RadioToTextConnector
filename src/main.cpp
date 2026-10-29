@@ -169,33 +169,44 @@ string radioDescription(int model) {
     return name.empty() ? "Hamlib model " + std::to_string(model) : name;
 }
 
-// Leaves radio empty for VOX. false if the radio can't be opened
+string radioControlDescription(const Settings& settings) {
+    if (!settings.hasCat()) return "None";
+    string text = radioDescription(settings.rigModel) + " on " + settings.catPort;
+    if (settings.rigModel != ownRigctldModel) text += " at " + std::to_string(settings.catBaud) + " baud";
+    return text;
+}
+
+string pttDescription(const Settings& settings) {
+    switch (settings.ptt) {
+        case PttType::Vox: return "VOX";
+        case PttType::Cat: return "CAT command";
+        case PttType::Rts:
+        case PttType::Dtr: {
+            string text = settings.ptt == PttType::Rts ? "RTS" : "DTR";
+            if (settings.pttPort.empty()) return text + " on the CAT port (" + settings.catPort + ")";
+            return text + " on " + settings.pttPort;
+        }
+    }
+    return "?";
+}
+
+// Opens what keys the radio. Leaves radio empty for VOX. false if it can't be opened
 bool openRadio(const Settings& settings, std::unique_ptr<Cat>& radio) {
-    if (settings.catPort.empty()) return true;
     try {
-        radio = std::make_unique<Cat>(settings.rigModel, settings.catPort, settings.catBaud);
+        radio = openPtt(settings);
         return true;
     } catch (const std::exception& e) {
-        showMessage("Cannot open the radio",
-                    radioDescription(settings.rigModel) + " on " + settings.catPort + ": " + e.what() +
-                    "\n\nCheck Settings > PTT.");
+        showMessage("Cannot open the radio", string(e.what()) + "\n\nPTT: " + pttDescription(settings) +
+                    "\nRadio (CAT): " + radioControlDescription(settings) +
+                    "\n\nCheck Settings > PTT and Radio (CAT).");
         return false;
     }
 }
 
-string pttDescription(const Settings& settings) {
-    if (settings.catPort.empty()) return "VOX";
-    string text = "CAT: " + radioDescription(settings.rigModel) + " on " + settings.catPort;
-    if (settings.rigModel != RIG_MODEL_NETRIGCTL) text += " at " + std::to_string(settings.catBaud) + " baud";
-    return text;
-}
-
 // On Windows direwolf is killed rather than stopped, so it may leave the radio keyed
 void unkeyAfterDirewolf(const Settings& settings) {
-    if (settings.catPort.empty()) return;
     try {
-        Cat radio(settings.rigModel, settings.catPort, settings.catBaud);
-        radio.setPtt(false);
+        if (auto radio = openPtt(settings)) radio->setPtt(false);
     } catch (const std::exception& e) {
         ansi::print(failColor, "Couldn't unkey the radio (%s). Check it isn't transmitting!\n", e.what());
     }
@@ -210,7 +221,11 @@ void printSessionHeader(const Settings& settings, bool onAir) {
         ansi::print(warnColor, "Warning: %g Hz shift is narrow for %g baud\n",
                     settings.shift, settings.baud);
     }
-    if (onAir) ansi::print(infoColor, "PTT: %s\n", pttDescription(settings).c_str());
+    if (onAir) {
+        ansi::print(infoColor, "PTT: %s\n", pttDescription(settings).c_str());
+        if (settings.ptt == PttType::Cat)
+            ansi::print(infoColor, "Radio: %s\n", radioControlDescription(settings).c_str());
+    }
     if (settings.packet() && settings.transmits() && !settings.sendTo.empty())
         ansi::print(infoColor, "Sending to %s\n", settings.sendTo.c_str());
     ansi::flush();
@@ -302,7 +317,7 @@ bool runDirewolf(const Settings& settings, const string& rxName, const string& t
     session.fx25 = settings.fx25;
     bool transmitted = false;
     bool ok = runPacketSession(session, transmitted);
-    if (transmitted) unkeyAfterDirewolf(settings);
+    if (transmitted && settings.keysRadio()) unkeyAfterDirewolf(settings);
     std::error_code ec;
     fs::remove(config, ec);
     if (!ok && !direwolfAvailable())
@@ -402,7 +417,7 @@ void startSession(Settings& settings) {
     }
 
     bool onAir = settings.transmits() && !useFile;
-    std::unique_ptr<Cat> radio;
+    std::unique_ptr<Cat> radio;   // Keys PTT; empty for VOX
     if (onAir && !openRadio(settings, radio)) return;
 
     printSessionHeader(settings, onAir);
@@ -457,39 +472,111 @@ bool pickRadio(Settings& settings) {
     }
 }
 
-void pickPtt(Settings& settings) {
+// The radio's control (CAT) port, model and speed. Esc leaves them as they were
+void pickRadioControl(Settings& settings) {
     vector<string> ports = os::listSerialPorts();
-    vector<string> labels = {"VOX"};
-    for (const string& port : ports) labels.push_back("CAT on " + port);
+    vector<string> labels = {"None"};
+    for (const string& port : ports) labels.push_back(port);
     labels.emplace_back("Type a port...");
     int current = settings.catPort.empty() ? 0 : static_cast<int>(labels.size()) - 1;
     for (int i = 0; i < static_cast<int>(ports.size()); i++)
         if (ports[i] == settings.catPort) current = i + 1;
 
-    int choice = ansi::selectWith("PTT", static_cast<int>(labels.size()), [&](int i) {
+    int choice = ansi::selectWith("Radio CAT port", static_cast<int>(labels.size()), [&](int i) {
         string label = labels[i];
         if (i == current) label += "   <- current";
         return label;
     }, current);
     if (choice < 0) return;
 
+    Settings changed = settings;
     string port;
     if (choice == static_cast<int>(labels.size()) - 1) {
         port = settings.catPort;
-        if (!ansi::inputLine("CAT port", "e.g. COM5, /dev/ttyACM0, or localhost:4532 for rigctld. "
-                             "Empty = VOX", port)) return;
+        if (!ansi::inputLine("CAT port", "e.g. COM5, /dev/ttyACM0, or localhost:4532 for your own rigctld. "
+                             "Empty = none", port)) return;
     } else if (choice > 0) {
         port = ports[choice - 1];
     }
     if (!port.empty()) {
-        if (!pickRadio(settings)) return;
-        if (settings.rigModel != static_cast<int>(RIG_MODEL_NETRIGCTL)) {
-            float baud = static_cast<float>(settings.catBaud);
+        if (!pickRadio(changed)) return;
+        if (changed.rigModel != ownRigctldModel) {
+            float baud = static_cast<float>(changed.catBaud);
             if (!pickOption("CAT baud rate", catBaudRates, baud)) return;
-            settings.catBaud = static_cast<int>(baud);
+            changed.catBaud = static_cast<int>(baud);
         }
     }
-    settings.catPort = port;
+    changed.catPort = port;
+    // Keying through a radio that's gone falls back to VOX
+    if (!changed.hasCat() && changed.ptt == PttType::Cat) changed.ptt = PttType::Vox;
+    if (!changed.hasCat() && changed.keysRadio() && changed.pttPort.empty()) changed.ptt = PttType::Vox;
+    if (string problem = pttProblem(changed); !problem.empty()) {
+        showMessage("Can't use that", "PTT is " + pttDescription(changed) + ", and " + problem + ".");
+        return;
+    }
+    settings = changed;
+}
+
+// The serial port for RTS/DTR keying. "" = the CAT port. false on Esc
+bool pickKeyingPort(Settings& settings, PttType type) {
+    string line = type == PttType::Rts ? "RTS" : "DTR";
+    vector<string> labels, values;
+    if (settings.hasCat() && settings.rigModel != ownRigctldModel) {
+        labels.push_back("The radio's CAT port (" + settings.catPort + ")");
+        values.emplace_back();
+    }
+    for (const string& port : os::listSerialPorts()) {
+        if (port == settings.catPort) continue;
+        labels.push_back(port);
+        values.push_back(port);
+    }
+    labels.emplace_back("Type a port...");
+    int current = 0;
+    for (int i = 0; i < static_cast<int>(values.size()); i++)
+        if (values[i] == settings.pttPort) current = i;
+
+    // Radios with two USB ports (e.g. FTDX3000) key on the second: Yaesu calls it "Standard"
+    int choice = ansi::selectWith(line + " on which port? (two-port radios: the second, e.g. Yaesu's "
+                                  "Standard port)", static_cast<int>(labels.size()), [&](int i) {
+        return labels[i];
+    }, current);
+    if (choice < 0) return false;
+    if (choice < static_cast<int>(values.size())) {
+        settings.pttPort = values[choice];
+        return true;
+    }
+    string port = settings.pttPort;
+    if (!ansi::inputLine("PTT port", "e.g. COM6 or /dev/ttyUSB1", port) || port.empty()) return false;
+    settings.pttPort = port;
+    return true;
+}
+
+void pickPtt(Settings& settings) {
+    vector<string> labels = {
+        "VOX                the radio keys itself when it hears audio",
+        "CAT command        sent over the radio's CAT port",
+        "RTS line           on a serial port (e.g. Digirig, IC-7300 USB SEND, FTDX3000 Standard port)",
+        "DTR line           on a serial port",
+    };
+    int choice = ansi::select("PTT", labels, static_cast<int>(settings.ptt));
+    if (choice < 0) return;
+    Settings changed = settings;
+    changed.ptt = static_cast<PttType>(choice);
+    if (changed.ptt == PttType::Cat && !changed.hasCat()) {
+        pickRadioControl(changed);
+        if (!changed.hasCat()) return;
+        changed.ptt = PttType::Cat;
+    }
+    if (changed.ptt == PttType::Rts || changed.ptt == PttType::Dtr) {
+        if (!pickKeyingPort(changed, changed.ptt)) return;
+    } else {
+        changed.pttPort.clear();
+    }
+    if (string problem = pttProblem(changed); !problem.empty()) {
+        showMessage("Can't use that", "PTT " + pttDescription(changed) + ": " + problem + ".");
+        return;
+    }
+    settings = changed;
 }
 
 void pickPacketBaud(Settings& settings) {
@@ -622,8 +709,7 @@ void settingsMenu(Settings& settings) {
                 pickAudioDevice(s, os::AudioDirection::Playback, devices);
             }});
             items.push_back({"PTT", pttDescription(s), [&] { pickPtt(s); }});
-            if (!s.catPort.empty())
-                items.push_back({"Radio", radioDescription(s.rigModel), [&] { pickRadio(s); }});
+            items.push_back({"Radio (CAT)", radioControlDescription(s), [&] { pickRadioControl(s); }});
         }
         items.push_back({"Audio file", s.audioFile.empty() ? "(none)" : s.audioFile, [&] {
             ansi::inputLine("Audio file", "WAV file. Empty = sound card", s.audioFile);
@@ -800,7 +886,7 @@ void testTransmit(Settings& settings, bool message) {
 
 void checkCat(const Settings& settings) {
     if (settings.catPort.empty()) {
-        showMessage("No CAT port", "PTT is set to VOX.");
+        showMessage("No CAT port", "Set one in Settings > Radio (CAT) (Mode must be Transmit or Duplex).");
         return;
     }
     ansi::clearScreen();

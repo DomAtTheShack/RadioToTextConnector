@@ -81,6 +81,42 @@ std::string fx25Name(int fx25) {
     return std::to_string(fx25) + " check bytes";
 }
 
+const char* pttKey(PttType ptt) {
+    switch (ptt) {
+        case PttType::Vox: return "vox";
+        case PttType::Cat: return "cat";
+        case PttType::Rts: return "rts";
+        case PttType::Dtr: return "dtr";
+    }
+    return "vox";
+}
+
+bool parsePttKey(const std::string& text, PttType& ptt) {
+    for (PttType type : {PttType::Vox, PttType::Cat, PttType::Rts, PttType::Dtr}) {
+        if (text == pttKey(type)) {
+            ptt = type;
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string pttProblem(const Settings& s) {
+    switch (s.ptt) {
+        case PttType::Vox:
+            return "";
+        case PttType::Cat:
+            return s.hasCat() ? "" : "CAT PTT needs a radio control (CAT) port";
+        case PttType::Rts:
+        case PttType::Dtr:
+            if (s.keyingPort().empty()) return "RTS/DTR PTT needs a serial port";
+            if (s.pttPort.empty() && s.rigModel == ownRigctldModel)
+                return "RTS/DTR PTT needs a serial port, not a rigctld address";
+            return "";
+    }
+    return "";
+}
+
 std::string formatSettings(const Settings& s) {
     std::ostringstream out;
     out << "# Radio to Text Connector settings\n";
@@ -103,6 +139,8 @@ std::string formatSettings(const Settings& s) {
     out << "cat_port=" << s.catPort << "\n";
     out << "cat_baud=" << s.catBaud << "\n";
     out << "rig_model=" << s.rigModel << "\n";
+    out << "ptt=" << pttKey(s.ptt) << "\n";
+    out << "ptt_port=" << s.pttPort << "\n";
     out << "audio_file=" << s.audioFile << "\n";
     out << "quiet=" << (s.quiet ? "1" : "0") << "\n";
     std::string path;
@@ -118,6 +156,7 @@ std::string formatSettings(const Settings& s) {
 
 Settings parseSettings(const std::string& text) {
     Settings s;
+    bool pttGiven = false;
     std::istringstream in(text);
     std::string line;
     while (std::getline(in, line)) {
@@ -165,6 +204,8 @@ Settings parseSettings(const std::string& text) {
             float baud;
             if (toFloat(value, baud)) s.catBaud = static_cast<int>(baud);
         }
+        else if (key == "ptt")          pttGiven = parsePttKey(value, s.ptt);
+        else if (key == "ptt_port")     s.pttPort = value;
         else if (key == "audio_file")   s.audioFile = value;
         else if (key == "quiet")        s.quiet = value == "1" || value == "true";
         else if (key == "path") {
@@ -180,6 +221,8 @@ Settings parseSettings(const std::string& text) {
         else if (key == "main")             s.mainAddress = value;
         else if (key == "send_to")          s.sendTo = value;
     }
+    // Files from before ptt= keyed over CAT whenever a CAT port was set
+    if (!pttGiven && s.hasCat()) s.ptt = PttType::Cat;
     return s;
 }
 

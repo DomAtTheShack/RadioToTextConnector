@@ -310,10 +310,9 @@ public:
             fs::remove(configPath, ec);
             configPath.clear();
         }
-        if (transmitted && !settings.catPort.empty()) {
+        if (transmitted && settings.keysRadio()) {
             try {
-                Cat radio(settings.rigModel, settings.catPort, settings.catBaud);
-                radio.setPtt(false);
+                if (auto radio = openPtt(settings)) radio->setPtt(false);
             } catch (const std::exception& e) {
                 logLine("WARNING: couldn't unkey the radio (%s). Check it isn't transmitting!", e.what());
             }
@@ -628,11 +627,10 @@ private:
 
     Json radioStatus() const {
         auto heard = engine.lastHeard();
-        const char* ptt = settings.catPort.empty() ? "vox" : settings.rigModel == 2 ? "rigctld" : "cat";
         return {
             {"state", Radio::name(radio.current())},
             {"direwolf", radio.direwolfState()},
-            {"ptt", ptt},
+            {"ptt", pttKey(settings.ptt)},
             {"txQueue", engine.txQueue()},
             {"inFlight", engine.inFlight()},
             {"heldForMain", engine.heldForMain()},

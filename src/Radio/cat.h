@@ -2,10 +2,13 @@
 #ifndef RTC_CAT_H
 #define RTC_CAT_H
 
+#include <memory>
 #include <string>
 #include <vector>
 
 #include <hamlib/rig.h>
+
+#include "../settings.h"
 
 struct RadioModel {
     rig_model_t model;
@@ -19,8 +22,10 @@ std::string radioName(rig_model_t model);
 // Every call throws std::runtime_error on failure
 class Cat {
 public:
-    // model 1 = dummy rig, 2 = rigctld (port is host:port)
-    Cat(rig_model_t model, const std::string& port, int baud = 19200);
+    // model 1 = dummy rig, 2 = rigctld (port is host:port). pttLine "RTS" or "DTR": setPtt
+    // uses that line of pttPort instead of a CAT command
+    Cat(rig_model_t model, const std::string& port, int baud = 19200,
+        const std::string& pttLine = "", const std::string& pttPort = "");
     ~Cat();
 
     Cat(const Cat&) = delete;
@@ -40,6 +45,11 @@ public:
 private:
     RIG* rig_;
 };
+
+// What keys the transmitter for these settings: the radio over CAT, or (RTS/DTR) only the
+// keying port's line. nullptr for VOX. Throws std::runtime_error. direwolf does its own
+// keying; this is for minimodem sessions and unkeying after direwolf
+std::unique_ptr<Cat> openPtt(const Settings& settings);
 
 // Keys PTT while it exists
 class PttGuard {
