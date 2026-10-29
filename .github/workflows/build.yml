@@ -198,9 +198,9 @@ jobs:
       - name: Install dependencies
         run: |
           brew update
-          # The runner image links another OpenSSL's bin/openssl, so upgrading openssl@4
-          # (for PulseAudio) would overwrite it with a warning. Unlink them all first
-          for keg in $(brew list --formula | grep '^openssl@' || true); do brew unlink "$keg"; done
+          # The runner image has its own bin/openssl, outside any Homebrew package, which
+          # upgrading openssl@4 (for PulseAudio) overwrites with a warning. Remove it first
+          rm -f "$(brew --prefix)/bin/openssl"
           # minimodem pulls in PulseAudio, which the device list links against
           brew install cmake ninja pkgconf hamlib minimodem
           # Only for the packet audio tests; they're skipped if it can't be installed
