@@ -87,12 +87,15 @@ std::string normalizeCallsign(const std::string& text) {
     return n == 0 ? base : base + "-" + std::to_string(n);
 }
 
-Bytes encodeUi(const std::string& source, const std::string& destination, std::string_view info) {
+Bytes encodeUi(const std::string& source, const std::string& destination, std::string_view info,
+               const std::vector<std::string>& path) {
     Bytes frame;
-    frame.reserve(2 * addressBytes + 2 + info.size());
-    // AX.25 v2 command frame: C bit set on the destination, clear on the source
+    frame.reserve((2 + path.size()) * addressBytes + 2 + info.size());
+    // AX.25 v2 command frame: C bit set on the destination, clear on the source.
+    // On a digipeater the same bit is H (has been repeated), clear when we send
     appendAddress(frame, destination, true, false);
-    appendAddress(frame, source, false, true);
+    appendAddress(frame, source, false, path.empty());
+    for (size_t i = 0; i < path.size(); i++) appendAddress(frame, path[i], false, i + 1 == path.size());
     frame.push_back(UI);
     frame.push_back(NO_LAYER3);
     frame.insert(frame.end(), info.begin(), info.end());
@@ -119,7 +122,10 @@ std::optional<Frame> decode(const Bytes& frame) {
     Frame out;
     out.destination = readAddress(&frame[0]);
     out.source = readAddress(&frame[addressBytes]);
-    for (size_t i = 2; i < addresses; i++) out.path.push_back(readAddress(&frame[i * addressBytes]));
+    for (size_t i = 2; i < addresses; i++) {
+        const uint8_t* address = &frame[i * addressBytes];
+        out.path.push_back(readAddress(address) + ((address[6] & 0x80) ? "*" : ""));
+    }
     out.info.assign(frame.begin() + static_cast<long>(control + 2), frame.end());
     return out;
 }
@@ -242,10 +248,10 @@ std::vector<Bytes> parseAtestDump(std::string_view output) {
 }
 
 std::vector<std::string> monitorLines(const std::string& source, const std::string& destination,
-                                      std::string_view text) {
+                                      std::string_view text, size_t maxInfoBytes) {
     std::vector<std::string> lines;
     std::string header = source + ">" + destination + ":";
-    for (const std::string& piece : splitInfo(text)) {
+    for (const std::string& piece : splitInfo(text, maxInfoBytes)) {
         std::string line = header;
         for (char ch : piece) {
             auto byte = static_cast<uint8_t>(ch);
@@ -262,10 +268,57 @@ std::vector<std::string> monitorLines(const std::string& source, const std::stri
     return lines;
 }
 
-double airtime(size_t frameBytes, int baud) {
+namespace {
+
+// direwolf's FX.25 blocks (fx25_init.c): data bytes, check bytes
+struct Fx25Block { int data; int check; };
+constexpr Fx25Block fx25Blocks[] = {
+    {32, 16}, {64, 16}, {128, 16}, {239, 16},
+    {32, 32}, {64, 32}, {128, 32}, {223, 32},
+    {64, 64}, {128, 64}, {191, 64},
+};
+// What direwolf picks for "auto", smallest first
+constexpr Fx25Block fx25Auto[] = {{32, 16}, {64, 16}, {128, 32}, {191, 64}, {223, 32}, {239, 16}};
+
+int largestFx25Block(int fx25) {
+    if (fx25 == 32) return 223;
+    if (fx25 == 64) return 191;
+    return 239;
+}
+
+// Bytes sent for a stuffed frame of hdlcBytes (flags included), or 0 if it doesn't fit
+size_t fx25Size(size_t hdlcBytes, int fx25) {
+    const size_t tag = 8;   // Correlation tag
+    if (fx25 == 16 || fx25 == 32 || fx25 == 64) {
+        for (const Fx25Block& block : fx25Blocks)
+            if (block.check == fx25 && hdlcBytes <= static_cast<size_t>(block.data))
+                return tag + block.data + block.check;
+        return 0;
+    }
+    for (const Fx25Block& block : fx25Auto)
+        if (hdlcBytes <= static_cast<size_t>(block.data)) return tag + block.data + block.check;
+    return 0;
+}
+
+} // namespace
+
+size_t maxInfoFor(int fx25) {
+    if (fx25 <= 0) return maxInfo;
+    // The block holds the frame and FCS after bit stuffing (up to 1 extra bit in 5),
+    // plus two flags. Header: two addresses, control and PID
+    const size_t header = 7 + 7 + 2;
+    size_t stuffed = static_cast<size_t>(largestFx25Block(fx25)) - 2;
+    return stuffed * 5 / 6 - 2 - header;
+}
+
+double airtime(size_t frameBytes, int baud, int fx25) {
     // Flags, FCS and ~5% bit stuffing
-    double bits = static_cast<double>(frameBytes + 4) * 8 * 1.05;
-    return bits / baud;
+    double bytes = static_cast<double>(frameBytes + 4) * 1.05;
+    if (fx25 > 0) {
+        size_t sent = fx25Size(static_cast<size_t>(bytes + 0.5), fx25);
+        if (sent > 0) bytes = static_cast<double>(sent);
+    }
+    return bytes * 8 / baud;
 }
 
 } // namespace packet

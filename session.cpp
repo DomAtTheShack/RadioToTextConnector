@@ -572,12 +572,12 @@ bool runPacketSession(const PacketSession& p, bool& transmitted) {
             start = end + 1;
             if (!line.empty() && line.back() == '\r') line.pop_back();
             if (line.empty()) continue;
-            for (const std::string& piece : packet::splitInfo(line)) {
+            for (const std::string& piece : packet::splitInfo(line, packet::maxInfoFor(p.fx25))) {
                 packet::Bytes frame = packet::encodeUi(p.callsign, packet::groupAddress, piece);
                 if (!link.send(frame)) return false;
                 auto now = Clock::now();
                 Clock::time_point begins = busyUntil > now ? busyUntil : now + seconds(keyUpSeconds);
-                busyUntil = begins + seconds(packet::airtime(frame.size(), p.baud));
+                busyUntil = begins + seconds(packet::airtime(frame.size(), p.baud, p.fx25));
                 transmitted = true;
             }
             screen.showPacket(p.callsign, line, sentColor);

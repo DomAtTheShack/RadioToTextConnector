@@ -230,11 +230,12 @@ bool pickCallsign(Settings& settings) {
 }
 
 // Typed lines -> gen_packets input (direwolf monitor format)
-TransmitFormat genPacketsFormat(const string& callsign) {
+TransmitFormat genPacketsFormat(const string& callsign, int fx25) {
     TransmitFormat format;
     format.name = "gen_packets";
     format.hideOutput = true;           // It echoes every packet
-    format.format = [callsign](const string& typed) {
+    size_t maxInfo = packet::maxInfoFor(fx25);
+    format.format = [callsign, maxInfo](const string& typed) {
         string out;
         size_t start = 0;
         while (start < typed.size()) {
@@ -243,7 +244,7 @@ TransmitFormat genPacketsFormat(const string& callsign) {
             string line = typed.substr(start, end - start);
             start = end + 1;
             if (line.empty()) continue;
-            for (const string& packetLine : packet::monitorLines(callsign, packet::groupAddress, line))
+            for (const string& packetLine : packet::monitorLines(callsign, packet::groupAddress, line, maxInfo))
                 out += packetLine + "\n";
         }
         return out;
@@ -275,6 +276,7 @@ bool runDirewolf(const Settings& settings, const string& rxName, const string& t
     session.kissPort = kissPort;
     session.callsign = settings.callsign;
     session.baud = settings.packetBaud;
+    session.fx25 = settings.fx25;
     bool transmitted = false;
     bool ok = runPacketSession(session, transmitted);
     if (transmitted) unkeyAfterDirewolf(settings);
@@ -314,7 +316,7 @@ void startPacketSession(Settings& settings) {
     if (useFile) {   // Transmit: write packets to the file
         printSessionHeader(settings, false);
         bool ok = runTransmit(genPacketsArgs(settings, file), nullptr, "", false,
-                              genPacketsFormat(settings.callsign));
+                              genPacketsFormat(settings.callsign, settings.fx25));
         if (!ok) ansi::print(failColor, "\nStopped with an error.\n");
         ansi::waitKey();
         return;
@@ -479,6 +481,26 @@ void pickPacketBaud(Settings& settings) {
     if (choice >= 0) settings.packetBaud = speeds[choice];
 }
 
+void pickFx25(Settings& settings) {
+    const int modes[] = {0, 1, 16, 32, 64};
+    const char* notes[] = {
+        "plain AX.25",
+        "16-64 check bytes, picked by packet size",
+        "fixes up to 8 bad bytes",
+        "fixes up to 16 bad bytes",
+        "fixes up to 32 bad bytes, shortest packets",
+    };
+    vector<string> labels;
+    int current = 0;
+    for (int i = 0; i < 5; i++) {
+        labels.push_back(padded(fx25Name(modes[i]), 16) + notes[i]);
+        if (modes[i] == settings.fx25) current = i;
+    }
+    int choice = ansi::select("FX.25 error correction (receivers without it still decode)",
+                              labels, current);
+    if (choice >= 0) settings.fx25 = modes[choice];
+}
+
 void pickShift(Settings& settings) {
     // Recommend the narrowest shift that suits the baud rate
     int recommended = -1;
@@ -538,6 +560,9 @@ void settingsMenu(Settings& settings) {
                              packetModemName(s.packetBaud) + ")", [&] { pickPacketBaud(s); }});
             items.push_back({"Callsign", s.callsign.empty() ? "(not set)" : s.callsign,
                              [&] { pickCallsign(s); }});
+            // Only sending needs the setting: direwolf decodes FX.25 whenever it hears it
+            if (s.transmits())
+                items.push_back({"FX.25", fx25Name(s.fx25), [&] { pickFx25(s); }});
         } else {
             items.push_back({"Protocol", protocolName(s.protocol), [&] {
                 int choice = ansi::select("Protocol", {"RTTY", "Bell202"},

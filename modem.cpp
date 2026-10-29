@@ -71,6 +71,8 @@ std::string direwolfConfig(const Settings& s, const std::string& rxDevice,
         "CHANNEL 0\n"
         "MYCALL " + call + "\n"
         "MODEM " + std::to_string(s.packetBaud) + "\n";
+    // Receiving decodes FX.25 either way
+    if (s.fx25 > 0) config += "FX25TX " + std::to_string(s.fx25) + "\n";
     if (!s.catPort.empty()) {
         // Model 2 (rigctld) takes host:port and no baud rate
         config += "PTT RIG " + std::to_string(s.rigModel) + " " + s.catPort;
@@ -94,15 +96,22 @@ std::vector<std::string> atestArgs(const Settings& s, const std::string& wavPath
 }
 
 std::vector<std::string> genPacketsArgs(const Settings& s, const std::string& wavPath) {
-    return {os::genPacketsPath(), "-B", std::to_string(s.packetBaud), "-r", "48000",
-            "-o", wavPath, "-"};
+    std::vector<std::string> args = {os::genPacketsPath(), "-B", std::to_string(s.packetBaud),
+                                     "-r", "48000"};
+    if (s.fx25 > 0) {
+        args.push_back("-X");
+        args.push_back(std::to_string(s.fx25));
+    }
+    args.insert(args.end(), {"-o", wavPath, "-"});
+    return args;
 }
 
 std::string describe(const Settings& s) {
     std::string text = operationName(s.operation);
     if (s.packet()) {
         text += " | direwolf " + std::to_string(s.packetBaud) + " baud AX.25 (" +
-                packetModemName(s.packetBaud) + ") | " +
+                packetModemName(s.packetBaud) + ")" +
+                (s.transmits() && s.fx25 > 0 ? " FX.25" : "") + " | " +
                 (s.callsign.empty() ? std::string("no callsign") : s.callsign);
         if (!s.audioFile.empty()) text += " | file " + s.audioFile;
         return text;

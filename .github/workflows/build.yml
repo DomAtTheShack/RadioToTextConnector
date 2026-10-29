@@ -109,7 +109,7 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist/Radio-to-Text-Connector
-          cp build/bin/RadioToTextConnector.exe build/bin/cat_test.exe build/bin/direwolf.exe build/bin/atest.exe build/bin/gen_packets.exe build/bin/*.dll README.md LICENSE dist/Radio-to-Text-Connector/
+          cp build/bin/RadioToTextConnector.exe build/bin/RadioConnector.exe build/bin/cat_test.exe build/bin/direwolf.exe build/bin/atest.exe build/bin/gen_packets.exe build/bin/*.dll README.md LICENSE dist/Radio-to-Text-Connector/
           cp -r build/bin/test-audio dist/Radio-to-Text-Connector/
           cd dist && zip -qr Radio-to-Text-Connector-windows-x64.zip Radio-to-Text-Connector
 
@@ -180,7 +180,7 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist/Radio-to-Text-Connector
-          cp build/RadioToTextConnector build/cat_test README.md LICENSE APT-PACKAGES.txt dist/Radio-to-Text-Connector/
+          cp build/RadioToTextConnector build/RadioConnector build/cat_test README.md LICENSE APT-PACKAGES.txt dist/Radio-to-Text-Connector/
           cp -r build/test-audio dist/Radio-to-Text-Connector/
           tar -C dist -czf dist/Radio-to-Text-Connector-linux-x64.tar.gz Radio-to-Text-Connector
 
@@ -228,7 +228,7 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist/Radio-to-Text-Connector
-          cp build/RadioToTextConnector build/cat_test README.md LICENSE dist/Radio-to-Text-Connector/
+          cp build/RadioToTextConnector build/RadioConnector build/cat_test README.md LICENSE dist/Radio-to-Text-Connector/
           cp -r build/test-audio dist/Radio-to-Text-Connector/
           tar -C dist -czf dist/Radio-to-Text-Connector-macos-arm64.tar.gz Radio-to-Text-Connector
 
@@ -268,7 +268,7 @@ jobs:
 
           **macOS (Apple Silicon):** \`brew install hamlib minimodem direwolf && brew services start pulseaudio\`,
           then \`tar xzf\` and \`./RadioToTextConnector\`. If macOS blocks it, run
-          \`xattr -d com.apple.quarantine RadioToTextConnector cat_test\` first.
+          \`xattr -d com.apple.quarantine RadioToTextConnector RadioConnector cat_test\` first.
           EOF
           # Replace the previous nightly (release and tag) with this one
           gh release delete nightly --cleanup-tag --yes || true

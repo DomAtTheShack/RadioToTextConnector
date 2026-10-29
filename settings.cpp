@@ -25,6 +25,14 @@ bool toFloat(const std::string& s, float& out) {
     return true;
 }
 
+bool toInt(const std::string& s, int low, int high, int& out) {
+    char* end = nullptr;
+    long value = std::strtol(s.c_str(), &end, 10);
+    if (end == s.c_str() || *end != '\0' || value < low || value > high) return false;
+    out = static_cast<int>(value);
+    return true;
+}
+
 std::string number(float value) {
     char buf[32];
     std::snprintf(buf, sizeof buf, "%g", value);
@@ -67,6 +75,12 @@ const char* protocolName(Protocol protocol) {
     return protocol == Protocol::Rtty ? "RTTY" : "Bell202 1200 bps";
 }
 
+std::string fx25Name(int fx25) {
+    if (fx25 <= 0) return "Off";
+    if (fx25 == 1) return "Auto";
+    return std::to_string(fx25) + " check bytes";
+}
+
 std::string formatSettings(const Settings& s) {
     std::ostringstream out;
     out << "# Radio to Text Connector settings\n";
@@ -79,6 +93,8 @@ std::string formatSettings(const Settings& s) {
     out << "shift=" << number(s.shift) << "\n";
     out << "squelch=" << number(s.squelch) << "\n";
     out << "packet_baud=" << s.packetBaud << "\n";
+    out << "fx25=" << (s.fx25 <= 0 ? std::string("off") : s.fx25 == 1 ? std::string("auto")
+                                                                         : std::to_string(s.fx25)) << "\n";
     out << "callsign=" << s.callsign << "\n";
     out << "rx_audio=" << s.rxAudio << "\n";
     out << "tx_audio=" << s.txAudio << "\n";
@@ -89,6 +105,13 @@ std::string formatSettings(const Settings& s) {
     out << "rig_model=" << s.rigModel << "\n";
     out << "audio_file=" << s.audioFile << "\n";
     out << "quiet=" << (s.quiet ? "1" : "0") << "\n";
+    std::string path;
+    for (const std::string& hop : s.path) path += (path.empty() ? "" : ",") + hop;
+    out << "path=" << path << "\n";
+    out << "retry_tries=" << s.retryTries << "\n";
+    out << "retry_extra_wait=" << s.retryExtraWait << "\n";
+    out << "hold_for_main=" << s.holdForMain << "\n";
+    out << "main=" << s.mainAddress << "\n";
     return out.str();
 }
 
@@ -122,6 +145,11 @@ Settings parseSettings(const std::string& text) {
             if (toFloat(value, baud) && (baud == 300 || baud == 1200 || baud == 9600))
                 s.packetBaud = static_cast<int>(baud);
         }
+        else if (key == "fx25") {
+            if (value == "off")  s.fx25 = 0;
+            if (value == "auto") s.fx25 = 1;
+            if (value == "16" || value == "32" || value == "64") s.fx25 = std::stoi(value);
+        }
         else if (key == "callsign")     s.callsign = value;
         else if (key == "rig_model") {
             float model;
@@ -138,6 +166,17 @@ Settings parseSettings(const std::string& text) {
         }
         else if (key == "audio_file")   s.audioFile = value;
         else if (key == "quiet")        s.quiet = value == "1" || value == "true";
+        else if (key == "path") {
+            s.path.clear();
+            std::istringstream hops(value);
+            std::string hop;
+            while (std::getline(hops, hop, ','))
+                if (!trim(hop).empty()) s.path.push_back(trim(hop));
+        }
+        else if (key == "retry_tries")      toInt(value, 1, 20, s.retryTries);
+        else if (key == "retry_extra_wait") toInt(value, 0, 600, s.retryExtraWait);
+        else if (key == "hold_for_main")    toInt(value, 0, 86400, s.holdForMain);
+        else if (key == "main")             s.mainAddress = value;
     }
     return s;
 }

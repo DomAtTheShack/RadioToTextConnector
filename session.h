@@ -37,6 +37,7 @@ struct PacketSession {
     int kissPort = 0;
     std::string callsign;
     int baud = 1200;                         // For estimating airtime
+    int fx25 = 0;                            // Settings::fx25: packet size and airtime
     bool showReceived = true;                // Receive and Duplex
     bool canType = false;                    // Transmit and Duplex
     std::string text;                        // Sent first

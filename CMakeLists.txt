@@ -28,8 +28,11 @@ add_library(hamproof_core STATIC
         modem.cpp modem.h
         packet.cpp packet.h
         fsk.cpp fsk.h
-        testcases.cpp testcases.h)
-target_include_directories(hamproof_core PUBLIC ${CMAKE_SOURCE_DIR})
+        testcases.cpp testcases.h
+        connector.cpp connector.h
+        connector_config.cpp connector_config.h)
+# third_party: nlohmann/json, copied in so builds don't need internet access
+target_include_directories(hamproof_core PUBLIC ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/third_party)
 # Lets the Test tools menu find tests/audio when run from the build folder
 target_compile_definitions(hamproof_core PRIVATE HAMPROOF_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
@@ -59,10 +62,14 @@ add_custom_command(TARGET RadioToTextConnector POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/tests/audio
                 $<TARGET_FILE_DIR:RadioToTextConnector>/test-audio)
 
+# Headless: one radio to the suite's main program over JSON/TCP (docs/connector-protocol.md)
+add_executable(RadioConnector radio_connector.cpp cat.cpp cat.h)
+target_link_libraries(RadioConnector PRIVATE hamproof_core)
+
 # Small CAT check against a radio, the X6100 simulator or the dummy rig
 add_executable(cat_test cat_test.cpp cat.cpp cat.h)
 
-set(HAMPROOF_EXECUTABLES RadioToTextConnector cat_test)
+set(HAMPROOF_EXECUTABLES RadioToTextConnector RadioConnector cat_test)
 if(HAMPROOF_TESTS)
     enable_testing()
     add_executable(hamproof_tests tests/hamproof_tests.cpp)
@@ -84,7 +91,7 @@ if(WIN32)
             INTERFACE_INCLUDE_DIRECTORIES ${HAMLIB_DIR}/include)
     # The exe needs Hamlib's DLLs next to it to start
     file(GLOB HAMLIB_DLLS ${HAMLIB_DIR}/bin/*.dll)
-    foreach(target RadioToTextConnector cat_test)
+    foreach(target RadioToTextConnector RadioConnector cat_test)
         add_custom_command(TARGET ${target} POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different ${HAMLIB_DLLS} $<TARGET_FILE_DIR:${target}>)
     endforeach()
@@ -146,6 +153,7 @@ if(WIN32 AND HAMPROOF_DIREWOLF)
             INSTALL_COMMAND ""
             BUILD_BYPRODUCTS ${DIREWOLF_OUTPUTS})
     add_dependencies(RadioToTextConnector direwolf_windows)
+    add_dependencies(RadioConnector direwolf_windows)
     add_custom_command(TARGET RadioToTextConnector POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DIREWOLF_OUTPUTS}
                     $<TARGET_FILE_DIR:RadioToTextConnector>)
@@ -159,6 +167,7 @@ if(WIN32 AND HAMPROOF_DIREWOLF)
 endif()
 
 target_link_libraries(RadioToTextConnector PRIVATE hamlib)
+target_link_libraries(RadioConnector PRIVATE hamlib)
 target_link_libraries(cat_test PRIVATE hamlib)
 
 if(MINGW)

@@ -3,6 +3,7 @@
 #define HAMPROOF_SETTINGS_H
 
 #include <string>
+#include <vector>
 
 enum class Operation { Receive, Transmit, Duplex };
 enum class Engine { Minimodem, Direwolf };
@@ -20,6 +21,8 @@ struct Settings {
     float shift   = 170.0f;    // Hz, RTTY only
     float squelch = 3.5f;      // minimodem -c, receiving only
     int packetBaud = 1200;     // direwolf: 300, 1200 or 9600
+    int fx25 = 1;              // direwolf FX.25 transmit: 0 off, 1 auto, 16/32/64 check
+                               // bytes. Receiving always decodes FX.25
     std::string callsign;      // direwolf
     std::string rxAudio;       // AudioDevice::name; empty = ask
     std::string txAudio;
@@ -30,6 +33,13 @@ struct Settings {
     int rigModel = defaultRigModel;   // Hamlib model number
     std::string audioFile;     // Empty = sound card
     bool quiet = false;        // minimodem -q
+
+    // Radio Connector only; the interactive program keeps them but doesn't use them
+    std::vector<std::string> path;   // Digipeaters, e.g. WIDE1-1
+    int retryTries = 4;              // Sends of a message before it fails
+    int retryExtraWait = 10;         // Seconds to wait for an ack, on top of the airtime
+    int holdForMain = 180;           // Seconds a received message waits for the main program
+    std::string mainAddress;         // host:port of the main program
 
     // Mark is the lower tone
     float markHz()  const { return centre - shift / 2.0f; }
@@ -54,5 +64,7 @@ bool saveSettings(const Settings& settings);
 const char* operationName(Operation operation);
 const char* engineName(Engine engine);
 const char* protocolName(Protocol protocol);
+// "Off", "Auto", "16 check bytes", ...
+std::string fx25Name(int fx25);
 
 #endif //HAMPROOF_SETTINGS_H

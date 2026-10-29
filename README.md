@@ -44,6 +44,24 @@ Set **Modem** to direwolf, then **Packet speed** and **Callsign**. Packets go to
 Esc waits for queued packets, then stops; Esc again stops now. direwolf always needs the
 Rx sound card. With an audio file, `atest` decodes and `gen_packets` writes.
 
+**FX.25** (Transmit and Duplex, Auto unless changed) adds Reed-Solomon error correction,
+so packets survive some bad bytes. Stations without FX.25 still decode them as plain AX.25. Receiving
+always decodes FX.25. Packets are shorter with it on (179 bytes of text, or 139 with 64
+check bytes), so long lines take more packets.
+
+### Radio Connector
+
+`RadioConnector --main 127.0.0.1:9000` runs headless: it connects one radio (direwolf,
+AX.25 with FX.25) to the suite's main program, which sends it text and config as JSON
+lines over TCP. The connector delivers the text to another station's connector, splitting
+it into parts, with acks and retries, and reports each message's state. The protocol is
+in [docs/connector-protocol.md](docs/connector-protocol.md).
+
+- It dials the main program and retries every 5 s; the radio keeps running meanwhile.
+- Config comes from the main program and is kept in the same `settings.ini`, so it starts
+  with the last one. It needs a callsign and both sound cards before direwolf starts.
+- `--verbose` logs every frame, JSON line and direwolf's output. Logs go to stderr.
+
 ### Installing the modems
 
 - **Windows**: the build compiles direwolf with Hamlib (the official build has no CAT
