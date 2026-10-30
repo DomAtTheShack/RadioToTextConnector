@@ -106,7 +106,7 @@ Logs go to stderr.
   package too, which the program runs on the sound cards you pick. Allow direwolf through
   Windows Firewall if asked.
 - **Linux**: `sudo apt install minimodem direwolf` (see `src/APT-PACKAGES.txt`).
-- **macOS**: `brew install hamlib minimodem direwolf && brew services start pulseaudio`.
+- **macOS**: `brew install minimodem direwolf && brew services start pulseaudio`.
   direwolf uses the default sound devices.
 
 The programs look on the PATH, in `/usr/local/bin`, `/opt/homebrew/bin` and next to
@@ -125,8 +125,13 @@ cmake --build build
   `direwolf/`. The programs, direwolf and Hamlib's DLLs end up together in `build/bin`.
 - Linux and macOS: Hamlib installed (`make install`, or Homebrew). `src/APT-PACKAGES.txt`
   lists the Ubuntu packages.
-- Options: `-DRTC_STATIC=ON` links libraries statically where possible,
-  `-DRTC_TESTS=OFF` skips RadioTests, `-DRTC_DIREWOLF=OFF` (Windows) skips building direwolf.
+- Options: `-DRTC_TESTS=OFF` skips RadioTests, `-DRTC_DIREWOLF=OFF` (Windows) skips
+  building direwolf.
+- `-DRTC_STATIC=ON` (Linux and macOS; what the releases use) links Hamlib, libusb and the
+  C++ runtime into the programs. It needs a static Hamlib that pkg-config finds:
+  `./configure --disable-shared --enable-static --without-cxx-binding`, then
+  `make install`; `.github/workflows/build.yml` does this. Windows builds always use the
+  bundled Hamlib DLLs.
 
 Source layout:
 

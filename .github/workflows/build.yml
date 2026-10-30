@@ -153,8 +153,15 @@ jobs:
                 -DCMAKE_PREFIX_PATH="$HOME/hamlib"
           cmake --build build
 
-      - name: Show linked libraries
-        run: ldd build/RadioConnectorCli
+      # glibc, ALSA and libudev stay shared; Hamlib and libusb must be inside
+      - name: Check linked libraries
+        run: |
+          for program in RadioConnectorCli RadioConnector RadioTests; do
+            echo "== $program"; ldd "build/$program"
+            if ldd "build/$program" | grep -E "hamlib|libusb"; then
+              echo "::error::$program links Hamlib or libusb as a shared library"; exit 1
+            fi
+          done
 
       # -V prints every case, so the log shows each result, not just pass/fail. RadioTests
       # also writes tables to the job summary and annotates any failure
@@ -185,19 +192,49 @@ jobs:
           # The runner image has its own bin/openssl, outside any Homebrew package, which
           # upgrading openssl@4 (for PulseAudio) overwrites with a warning. Remove it first
           rm -f "$(brew --prefix)/bin/openssl"
-          # minimodem pulls in PulseAudio, which the device list links against
-          brew install cmake ninja pkgconf hamlib minimodem
+          # minimodem pulls in PulseAudio, which the device list links against. libusb
+          # includes a static library, which the static Hamlib below uses
+          brew install cmake ninja pkgconf libusb minimodem
           # Only for the packet audio tests; they're skipped if it can't be installed
           brew install direwolf || echo "direwolf not installed; packet audio tests will be skipped"
           cmake --version
 
+      # Hamlib built from source, static only, so it ends up inside the programs and users
+      # don't need Homebrew's. Cached, so this only takes minutes the first time
+      - name: Cache Hamlib
+        id: hamlib-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/hamlib
+          key: hamlib-${{ env.HAMLIB_VERSION }}-macos-arm64-static
+
+      - name: Build Hamlib
+        if: steps.hamlib-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSLO "https://github.com/Hamlib/Hamlib/releases/download/${HAMLIB_VERSION}/hamlib-${HAMLIB_VERSION}.tar.gz"
+          echo "ae1fcf2dbc80ea0786ea8f047b09399c3f7737d1930442f61a031708ed33e88f  hamlib-${HAMLIB_VERSION}.tar.gz" | shasum -a 256 -c
+          tar xzf "hamlib-${HAMLIB_VERSION}.tar.gz"
+          cd "hamlib-${HAMLIB_VERSION}"
+          ./configure --prefix="$HOME/hamlib" --disable-shared --enable-static --without-cxx-binding --without-readline
+          make -j"$(sysctl -n hw.ncpu)"
+          make install
+
       - name: Build
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DRTC_STATIC=ON
+          export PKG_CONFIG_PATH="$HOME/hamlib/lib/pkgconfig"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DRTC_STATIC=ON \
+                -DCMAKE_PREFIX_PATH="$HOME/hamlib"
           cmake --build build
 
-      - name: Show linked libraries
-        run: otool -L build/RadioConnectorCli
+      # System libraries and PulseAudio stay shared; Hamlib and libusb must be inside
+      - name: Check linked libraries
+        run: |
+          for program in RadioConnectorCli RadioConnector RadioTests; do
+            otool -L "build/$program"
+            if otool -L "build/$program" | grep -E "hamlib|libusb"; then
+              echo "::error::$program links Hamlib or libusb as a shared library"; exit 1
+            fi
+          done
 
       # -V prints every case, so the log shows each result, not just pass/fail. RadioTests
       # also writes tables to the job summary and annotates any failure
@@ -242,10 +279,11 @@ jobs:
           direwolf programs next to it (direwolf is included, built with Hamlib). minimodem
           has to be installed separately (Cygwin build).
 
-          **Linux:** \`tar xzf\`, then \`./RadioConnectorCli\`. Needs ALSA, libusb, and
-          minimodem and/or direwolf (see APT-PACKAGES.txt).
+          **Linux:** \`tar xzf\`, then \`./RadioConnectorCli\`. Hamlib and libusb are built in.
+          Needs ALSA, and minimodem and/or direwolf (see APT-PACKAGES.txt).
 
-          **macOS (Apple Silicon):** \`brew install hamlib minimodem direwolf && brew services start pulseaudio\`,
+          **macOS (Apple Silicon):** Hamlib and libusb are built in.
+          \`brew install minimodem direwolf && brew services start pulseaudio\`,
           then \`tar xzf\` and \`./RadioConnectorCli\`. If macOS blocks it, run
           \`xattr -d com.apple.quarantine RadioConnectorCli RadioConnector RadioTests\` first.
           EOF

@@ -14,8 +14,9 @@ if(WIN32)
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
-# -DRTC_STATIC=ON links the C++ runtime (and Hamlib on Linux) into the exe.
-# Windows (MinGW) builds always link the runtime statically
+# -DRTC_STATIC=ON (Linux and macOS) links the C++ runtime, Hamlib and libusb into the
+# programs. It needs a static Hamlib (libhamlib.a) that pkg-config can find. Windows
+# (MinGW) builds always link the runtime statically and use the bundled Hamlib DLLs
 option(RTC_STATIC "Link libraries statically where possible" OFF)
 option(RTC_TESTS "Build RadioTests and register it with ctest" ON)
 
@@ -54,31 +55,42 @@ else()
     target_link_libraries(rtc_core PUBLIC ALSA::ALSA)
 endif()
 
-# Hamlib: the bundled Windows build, the one installed with `make install` on Linux,
-# or Homebrew's on macOS
+# Hamlib:
+# - Windows: the bundled build; its DLLs are copied next to the programs
+# - RTC_STATIC: a static Hamlib (from `make install`, or built from source as in the CI),
+#   with libusb static too, so nothing has to be installed for them
+# - Otherwise: the one installed with `make install` on Linux, or Homebrew's on macOS
 if(WIN32)
     set(HAMLIB_DIR ${CMAKE_SOURCE_DIR}/hamlib-w64-4.7.2)
+    set(HAMLIB_INCLUDE_DIR ${HAMLIB_DIR}/include)
     add_library(hamlib SHARED IMPORTED)
     set_target_properties(hamlib PROPERTIES
             IMPORTED_IMPLIB ${HAMLIB_DIR}/lib/gcc/libhamlib.dll.a
             IMPORTED_LOCATION ${HAMLIB_DIR}/bin/libhamlib-4.dll
-            INTERFACE_INCLUDE_DIRECTORIES ${HAMLIB_DIR}/include)
+            INTERFACE_INCLUDE_DIRECTORIES ${HAMLIB_INCLUDE_DIR})
+    # libhamlib-4.dll and the DLLs it needs (libusb, libgcc, libwinpthread)
     file(GLOB HAMLIB_DLLS ${HAMLIB_DIR}/bin/*.dll)
 elseif(RTC_STATIC)
-    # `make install` of Hamlib (and Homebrew's) puts libhamlib.a next to the shared library
-    find_library(HAMLIB_STATIC_LIBRARY libhamlib.a REQUIRED)
-    find_path(HAMLIB_INCLUDE_DIR hamlib/rig.h REQUIRED)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(HAMLIB_PC REQUIRED hamlib)
+    find_library(HAMLIB_STATIC_LIBRARY libhamlib.a HINTS ${HAMLIB_PC_STATIC_LIBRARY_DIRS} REQUIRED)
+    find_path(HAMLIB_INCLUDE_DIR hamlib/rig.h HINTS ${HAMLIB_PC_STATIC_INCLUDE_DIRS} REQUIRED)
+    # What a static Hamlib links against: libusb (for a few USB radios), plus system
+    # libraries (libm, libudev, macOS frameworks...), which stay as they are
+    set(HAMLIB_DEPS ${HAMLIB_PC_STATIC_LIBRARIES})
+    list(REMOVE_ITEM HAMLIB_DEPS hamlib)
+    if("usb-1.0" IN_LIST HAMLIB_DEPS)
+        find_library(LIBUSB_STATIC_LIBRARY libusb-1.0.a HINTS ${HAMLIB_PC_STATIC_LIBRARY_DIRS} REQUIRED)
+        list(TRANSFORM HAMLIB_DEPS REPLACE "^usb-1\\.0$" "${LIBUSB_STATIC_LIBRARY}")
+    endif()
     add_library(hamlib STATIC IMPORTED)
     set_target_properties(hamlib PROPERTIES
             IMPORTED_LOCATION ${HAMLIB_STATIC_LIBRARY}
-            INTERFACE_INCLUDE_DIRECTORIES ${HAMLIB_INCLUDE_DIR})
-    # A static Hamlib also needs the libraries it uses (libusb, libudev, ...)
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(HAMLIB_PC REQUIRED hamlib)
-    list(REMOVE_ITEM HAMLIB_PC_STATIC_LIBRARIES hamlib)
-    set_target_properties(hamlib PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES ${HAMLIB_INCLUDE_DIR}
             INTERFACE_LINK_DIRECTORIES "${HAMLIB_PC_STATIC_LIBRARY_DIRS}"
-            INTERFACE_LINK_LIBRARIES "${HAMLIB_PC_STATIC_LIBRARIES}")
+            INTERFACE_LINK_LIBRARIES "${HAMLIB_DEPS}"
+            # e.g. -pthread, or libusb's -Wl,-framework,IOKit on macOS
+            INTERFACE_LINK_OPTIONS "${HAMLIB_PC_STATIC_LDFLAGS_OTHER}")
 else()
     find_library(HAMLIB_LIBRARY hamlib REQUIRED)
     find_path(HAMLIB_INCLUDE_DIR hamlib/rig.h REQUIRED)
@@ -148,7 +160,7 @@ if(WIN32 AND RTC_DIREWOLF)
                 -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
                 -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
                 -DCMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}
-                -DHAMLIB_INCLUDE_DIR=${HAMLIB_DIR}/include
+                -DHAMLIB_INCLUDE_DIR=${HAMLIB_INCLUDE_DIR}
                 -DHAMLIB_LIBRARY=${HAMLIB_DIR}/lib/gcc/libhamlib.dll.a
                 # The MinGW runtime goes inside the exes, so they only need Hamlib's DLLs
                 -DCMAKE_EXE_LINKER_FLAGS=-static
@@ -176,7 +188,8 @@ foreach(program ${RTC_PROGRAMS})
         target_link_options(${program} PRIVATE -static)
     elseif(RTC_STATIC AND NOT APPLE)
         # glibc and ALSA stay shared: a fully static glibc binary breaks ALSA's plugin
-        # loading and name lookups. On macOS libc++ is part of the system; only Hamlib is static
+        # loading and name lookups. On macOS libc++ is part of the system; only Hamlib and
+        # libusb are static
         target_link_options(${program} PRIVATE -static-libgcc -static-libstdc++)
     endif()
 endforeach()
